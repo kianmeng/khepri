@@ -19,13 +19,13 @@
 %% Structure representing each node in the tree, including the root node.
 %% TODO: Rename stat to something more correct?
 -record(node, {stat = ?INIT_NODE_STAT :: khepri_machine:stat(),
-               payload = none :: khepri_machine:payload(),
+               payload = ?NO_PAYLOAD :: khepri_machine:payload(),
                child_nodes = #{} :: #{khepri_path:component() := #node{}}}).
 
 %% State machine commands.
 
 -record(put, {path :: khepri_path:pattern(),
-              payload = none :: khepri_machine:payload(),
+              payload = ?NO_PAYLOAD :: khepri_machine:payload(),
               extra = #{} :: #{keep_while =>
                                khepri_machine:keep_while_conds_map()}}).
 
@@ -45,10 +45,3 @@
                     event_filter :: khepri_machine:event_filter(),
                     sproc :: khepri_fun:standalone_fun(),
                     props = #{} :: map()}).
-
-%% Structure representing an anonymous function "extracted" as a compiled
-%% module for storage.
--record(standalone_fun, {module :: module(),
-                         beam :: binary(),
-                         arity :: arity(),
-                         env :: list()}).

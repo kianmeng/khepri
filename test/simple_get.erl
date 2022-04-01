@@ -32,7 +32,7 @@ get_existing_node_test_() ->
      fun() -> test_ra_server_helpers:setup(?FUNCTION_NAME) end,
      fun(Priv) -> test_ra_server_helpers:cleanup(Priv) end,
      [?_assertEqual(
-         ok,
+         {ok, #{[foo] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo], foo_value)),
       ?_assertEqual(
          {ok, #{[foo] => #{data => foo_value,
@@ -46,10 +46,10 @@ get_many_nodes_test_() ->
      fun() -> test_ra_server_helpers:setup(?FUNCTION_NAME) end,
      fun(Priv) -> test_ra_server_helpers:cleanup(Priv) end,
      [?_assertEqual(
-         ok,
+         {ok, #{[foo, bar] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo, bar], bar_value)),
       ?_assertEqual(
-         ok,
+         {ok, #{[baz] => #{}}},
          khepri:create(?FUNCTION_NAME, [baz], baz_value)),
       ?_assertEqual(
          {ok, #{[] => #{payload_version => 1,
@@ -78,7 +78,7 @@ check_node_exists_test_() ->
      fun() -> test_ra_server_helpers:setup(?FUNCTION_NAME) end,
      fun(Priv) -> test_ra_server_helpers:cleanup(Priv) end,
      [?_assertEqual(
-         ok,
+         {ok, #{[foo] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo], foo_value)),
       ?_assert(khepri:exists(?FUNCTION_NAME, [foo])),
       ?_assertNot(khepri:exists(?FUNCTION_NAME, [bar]))]}.
@@ -88,10 +88,10 @@ check_node_has_data_test_() ->
      fun() -> test_ra_server_helpers:setup(?FUNCTION_NAME) end,
      fun(Priv) -> test_ra_server_helpers:cleanup(Priv) end,
      [?_assertEqual(
-         ok,
+         {ok, #{[foo, bar] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo, bar], bar_value)),
       ?_assertEqual(
-         ok,
+         {ok, #{[baz] => #{}}},
          khepri:create(?FUNCTION_NAME, [baz], baz_value)),
       ?_assertNot(khepri:has_data(?FUNCTION_NAME, [foo])),
       ?_assert(khepri:has_data(?FUNCTION_NAME, [baz]))]}.
@@ -109,10 +109,10 @@ list_existing_node_test_() ->
      fun() -> test_ra_server_helpers:setup(?FUNCTION_NAME) end,
      fun(Priv) -> test_ra_server_helpers:cleanup(Priv) end,
      [?_assertEqual(
-         ok,
+         {ok, #{[foo, bar] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo, bar], bar_value)),
       ?_assertEqual(
-         ok,
+         {ok, #{[baz] => #{}}},
          khepri:create(?FUNCTION_NAME, [baz], baz_value)),
       ?_assertEqual(
          {ok, #{[] => #{payload_version => 1,
@@ -140,10 +140,10 @@ find_node_by_name_in_filled_db_test_() ->
      fun() -> test_ra_server_helpers:setup(?FUNCTION_NAME) end,
      fun(Priv) -> test_ra_server_helpers:cleanup(Priv) end,
      [?_assertEqual(
-         ok,
+         {ok, #{[foo, bar] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo, bar], bar_value)),
       ?_assertEqual(
-         ok,
+         {ok, #{[baz] => #{}}},
          khepri:create(?FUNCTION_NAME, [baz], baz_value)),
       ?_assertEqual(
          {ok, #{[foo] => #{payload_version => 1,
@@ -156,10 +156,10 @@ find_node_by_condition_in_filled_db_test_() ->
      fun() -> test_ra_server_helpers:setup(?FUNCTION_NAME) end,
      fun(Priv) -> test_ra_server_helpers:cleanup(Priv) end,
      [?_assertEqual(
-         ok,
+         {ok, #{[foo, bar] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo, bar], bar_value)),
       ?_assertEqual(
-         ok,
+         {ok, #{[baz] => #{}}},
          khepri:create(?FUNCTION_NAME, [baz], baz_value)),
       ?_assertEqual(
          {ok, #{[foo, bar] => #{data => bar_value,
@@ -177,16 +177,16 @@ find_node_starting_from_subnode_test_() ->
      fun() -> test_ra_server_helpers:setup(?FUNCTION_NAME) end,
      fun(Priv) -> test_ra_server_helpers:cleanup(Priv) end,
      [?_assertEqual(
-         ok,
+         {ok, #{[foo, bar] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo, bar], bar_value)),
       ?_assertEqual(
-         ok,
+         {ok, #{[foo, bar, baz] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo, bar, baz], baz_value)),
       ?_assertEqual(
-         ok,
+         {ok, #{[foo, bar, qux] => #{}}},
          khepri:create(?FUNCTION_NAME, [foo, bar, qux], qux_value)),
       ?_assertEqual(
-         ok,
+         {ok, #{[baz] => #{}}},
          khepri:create(?FUNCTION_NAME, [baz], baz_value)),
       ?_assertEqual(
          {ok, #{[foo, bar, baz] => #{data => baz_value,

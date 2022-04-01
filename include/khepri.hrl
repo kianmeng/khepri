@@ -37,10 +37,11 @@
 %% Payload types.
 %% -------------------------------------------------------------------
 
+-define(NO_PAYLOAD, '$__NO_PAYLOAD__').
 -record(kpayload_data, {data :: khepri_machine:data()}).
 -record(kpayload_sproc, {sproc :: khepri_fun:standalone_fun()}).
 
--define(IS_KHEPRI_PAYLOAD(Payload), (Payload =:= none orelse
+-define(IS_KHEPRI_PAYLOAD(Payload), (Payload =:= ?NO_PAYLOAD orelse
                                      is_record(Payload, kpayload_data) orelse
                                      is_record(Payload, kpayload_sproc))).
 

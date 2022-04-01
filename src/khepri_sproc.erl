@@ -12,6 +12,7 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -include("include/khepri.hrl").
+-include("src/khepri_fun.hrl").
 -include("src/internal.hrl").
 
 %% For internal user only.

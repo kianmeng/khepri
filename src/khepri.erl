@@ -86,6 +86,7 @@
 -include_lib("kernel/include/logger.hrl").
 
 -include("include/khepri.hrl").
+-include("src/khepri_fun.hrl").
 -include("src/internal.hrl").
 
 -export([start/0,
@@ -102,24 +103,30 @@
          locally_known_nodes/1,
          get_store_ids/0,
 
-         create/2, create/3,
-         insert/2, insert/3,
-         update/2, update/3,
-         compare_and_swap/3, compare_and_swap/4,
+         put/2, put/3, put/4, put/5,
+         create/2, create/3, create/4, create/5,
+         update/2, update/3, update/4, update/5,
+         compare_and_swap/3, compare_and_swap/4, compare_and_swap/5,
+         compare_and_swap/6,
+         wrap_payload/1,
 
-         clear_payload/1, clear_payload/2,
-         delete/1, delete/2,
+         clear_payload/1, clear_payload/2, clear_payload/3, clear_payload/4,
+         delete/1, delete/2, delete/3,
 
+         exists/1, exists/2, exists/3,
          get/1, get/2, get/3,
-         exists/1, exists/2,
-         has_data/1, has_data/2,
-         list/1, list/2,
-         find/2, find/3,
+         has_data/1, has_data/2, has_data/3,
+         get_data/1, get_data/2, get_data/3,
+         has_sproc/1, has_sproc/2, has_sproc/3,
+         run_sproc/2, run_sproc/3, run_sproc/4,
+         register_trigger/3, register_trigger/4, register_trigger/5,
 
-         transaction/1, transaction/2, transaction/3,
-         run_sproc/2, run_sproc/3,
+         list/1, list/2, list/3,
+         find/2, find/3, find/4,
 
-         clear_store/0, clear_store/1,
+         transaction/1, transaction/2, transaction/3, transaction/4,
+
+         clear_store/0, clear_store/1, clear_store/2,
 
          no_payload/0,
          data_payload/1,
@@ -128,7 +135,24 @@
          info/0,
          info/1]).
 
--compile({no_auto_import, [get/2]}).
+-compile({no_auto_import, [get/2, put/2, erase/1]}).
+
+%% FIXME: Dialyzer complains about several functions with "optional" arguments
+%% (but not all). I believe the specs are correct, but can't figure out how to
+%% please Dialyzer. So for now, let's disable this specific check for the
+%% problematic functions.
+-if(?OTP_RELEASE >= 24).
+-dialyzer({no_underspecs, [put/2, put/3,
+                           create/2, create/3,
+                           update/2, update/3,
+                           compare_and_swap/3, compare_and_swap/4,
+                           exists/2,
+                           has_data/2,
+                           get_data/2,
+                           has_sproc/2,
+                           run_sproc/3,
+                           transaction/2, transaction/3]}).
+-endif.
 
 -type store_id() :: ra:cluster_name().
 %% ID of a Khepri store.
@@ -203,260 +227,642 @@ get_store_ids() ->
 %% `khepri_machine' module.
 %% -------------------------------------------------------------------
 
--spec create(Path, Data) -> ok | error() when
-      Path :: khepri_path:pattern() | string(),
-      Data :: khepri_machine:data().
+-spec put(PathPattern, Data) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Result :: khepri_machine:result().
+%% @doc Creates or modifies a specific tree node in the tree structure.
+%%
+%% Calling this function is the same as calling `put(StoreId, PathPattern,
+%% Data)' with the default store ID.
+%%
+%% @see put/3.
+
+put(PathPattern, Data) ->
+    put(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Data).
+
+-spec put(StoreId, PathPattern, Data) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Result :: khepri_machine:result().
+%% @doc Creates or modifies a specific tree node in the tree structure.
+%%
+%% Calling this function is the same as calling `put(StoreId, PathPattern,
+%% Data, #{}, #{})'.
+%%
+%% @see put/5.
+
+put(StoreId, PathPattern, Data) ->
+    put(StoreId, PathPattern, Data, #{}, #{}).
+
+-spec put(StoreId, PathPattern, Data, Extra | Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Creates or modifies a specific tree node in the tree structure.
+%%
+%% Calling this function is the same as calling `put(StoreId, PathPattern,
+%% Data, Extra, Options)' with an empty `Extra' or `Options'.
+%%
+%% @see put/5.
+
+put(StoreId, PathPattern, Data, #{keep_while := _} = Extra) ->
+    put(StoreId, PathPattern, Data, Extra, #{});
+put(StoreId, PathPattern, Data, Options) ->
+    put(StoreId, PathPattern, Data, #{}, Options).
+
+-spec put(StoreId, PathPattern, Data, Extra, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Creates or modifies a specific tree node in the tree structure.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The provided data is embedded in a {@link khepri_machine:payload_data()} or
+%% {@link khepri_machine:payload_sproc()} record before it can be stored in
+%% the database.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:put/5}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the node to create or
+%%        modify.
+%% @param Data the Erlang term or function to store.
+%% @param Extra extra options such as `keep_while' conditions.
+%% @param Options command options such as the command type.
+%%
+%% @returns in the case of a synchronous put, an "ok" tuple with a map with one
+%% entry, or an "error" tuple; in the case of an asynchronous put, always `ok'
+%% (the actual return value may be sent by a message if a correlation ID was
+%% specified).
+%%
+%% @see khepri_machine:put/5.
+
+put(StoreId, PathPattern, Data, Extra, Options) ->
+    do_put(StoreId, PathPattern, Data, Extra, Options).
+
+-spec create(PathPattern, Data) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Result :: khepri_machine:result().
 %% @doc Creates a specific tree node in the tree structure only if it does not
 %% exist.
 %%
-%% Calling this function is the same as calling
-%% `create(StoreId, Path, Data)' with the default store ID.
+%% Calling this function is the same as calling `create(StoreId, PathPattern,
+%% Data)' with the default store ID.
 %%
 %% @see create/3.
 
-create(Path, Data) ->
-    create(?DEFAULT_RA_CLUSTER_NAME, Path, Data).
+create(PathPattern, Data) ->
+    create(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Data).
 
--spec create(StoreId, Path, Data) -> ok | error() when
-    StoreId :: store_id(),
-    Path :: khepri_path:pattern() | string(),
-    Data :: khepri_machine:data().
+-spec create(StoreId, PathPattern, Data) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Result :: khepri_machine:result().
 %% @doc Creates a specific tree node in the tree structure only if it does not
 %% exist.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
+%% Calling this function is the same as calling `create(StoreId, PathPattern,
+%% Data, #{}, #{})'.
 %%
-%% The `Path' is the modified to include a `#if_node_exists{exists = false}'
-%% condition on its last component.
-%%
-%% Once the path is possibly converted to a list of node names and conditions
-%% and udpated, it calls {@link khepri_machine:put/3}.
-%%
-%% @returns a single "ok" atom or an "error" tuple, unlike
-%% {@link khepri_machine:put/3}.
-%%
-%% @see khepri_machine:put/3.
+%% @see create/5.
 
-create(StoreId, Path, Data) ->
-    Path1 = khepri_path:maybe_from_string(Path),
-    Path2 = khepri_path:combine_with_conditions(
-              Path1, [#if_node_exists{exists = false}]),
-    do_put(StoreId, Path2, Data).
+create(StoreId, PathPattern, Data) ->
+    create(StoreId, PathPattern, Data, #{}, #{}).
 
--spec insert(Path, Data) -> ok | error() when
-      Path :: khepri_path:pattern() | string(),
-      Data :: khepri_machine:data().
-%% @doc Creates or modifies a specific tree node in the tree structure.
-%%
-%% Calling this function is the same as calling
-%% `insert(StoreId, Path, Data)' with the default store ID.
-%%
-%% @see insert/3.
-
-insert(Path, Data) ->
-    insert(?DEFAULT_RA_CLUSTER_NAME, Path, Data).
-
--spec insert(StoreId, Path, Data) -> ok | error() when
+-spec create(StoreId, PathPattern, Data, Extra | Options) -> Result when
       StoreId :: store_id(),
-      Path :: khepri_path:pattern() | string(),
-      Data :: khepri_machine:data().
-%% @doc Creates or modifies a specific tree node in the tree structure.
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Creates a specific tree node in the tree structure only if it does not
+%% exist.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
+%% Calling this function is the same as calling `create(StoreId, PathPattern,
+%% Data, Extra, Options)' with an empty `Extra' or `Options'.
 %%
-%% Once the path is normalized to a list of tree node names and conditions and
-%% updated, it calls {@link khepri_machine:put/3}.
-%%
-%% @returns a single "ok" atom or an "error" tuple, unlike
-%% {@link khepri_machine:put/3}.
-%%
-%% @see khepri_machine:put/3.
+%% @see create/5.
 
-insert(StoreId, Path, Data) ->
-    Path1 = khepri_path:maybe_from_string(Path),
-    do_put(StoreId, Path1, Data).
+create(StoreId, PathPattern, Data, #{keep_while := _} = Extra) ->
+    create(StoreId, PathPattern, Data, Extra, #{});
+create(StoreId, PathPattern, Data, Options) ->
+    create(StoreId, PathPattern, Data, #{}, Options).
 
--spec update(Path, Data) -> ok | error() when
-      Path :: khepri_path:pattern() | string(),
-      Data :: khepri_machine:data().
+-spec create(StoreId, PathPattern, Data, Extra, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Creates a specific tree node in the tree structure only if it does not
+%% exist.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' is then modified to include an `#if_node_exists{exists =
+%% false}' condition on its last component.
+%%
+%% The provided data is embedded in a {@link khepri_machine:payload_data()} or
+%% {@link khepri_machine:payload_sproc()} record before it can be stored in
+%% the database.
+%%
+%% Once the path is normalized to a list of tree node names and conditions,
+%% and updated, it calls {@link khepri_machine:put/5}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the node to create.
+%% @param Data the Erlang term or function to store.
+%% @param Extra extra options such as `keep_while' conditions.
+%% @param Options command options such as the command type.
+%%
+%% @returns in the case of a synchronous put, an "ok" tuple with a map with one
+%% entry, or an "error" tuple; in the case of an asynchronous put, always `ok'
+%% (the actual return value may be sent by a message if a correlation ID was
+%% specified).
+%%
+%% @see khepri_machine:put/5.
+
+create(StoreId, PathPattern, Data, Extra, Options) ->
+    PathPattern1 = khepri_path:from_string(PathPattern),
+    PathPattern2 = khepri_path:combine_with_conditions(
+                     PathPattern1, [#if_node_exists{exists = false}]),
+    do_put(StoreId, PathPattern2, Data, Extra, Options).
+
+-spec update(PathPattern, Data) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Result :: khepri_machine:result().
 %% @doc Updates a specific tree node in the tree structure only if it already
 %% exists.
 %%
-%% Calling this function is the same as calling
-%% `update(StoreId, Path, Data)' with the default store ID.
+%% Calling this function is the same as calling `update(StoreId, PathPattern,
+%% Data)' with the default store ID.
 %%
 %% @see update/3.
 
-update(Path, Data) ->
-    update(?DEFAULT_RA_CLUSTER_NAME, Path, Data).
+update(PathPattern, Data) ->
+    update(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Data).
 
--spec update(StoreId, Path, Data) -> ok | error() when
+-spec update(StoreId, PathPattern, Data) -> Result when
       StoreId :: store_id(),
-      Path :: khepri_path:pattern() | string(),
-      Data :: khepri_machine:data().
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Result :: khepri_machine:result().
 %% @doc Updates a specific tree node in the tree structure only if it already
 %% exists.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
+%% Calling this function is the same as calling `update(StoreId, PathPattern,
+%% Data, #{}, #{})'.
 %%
-%% The `Path' is the modified to include a `#if_node_exists{exists = true}'
-%% condition on its last component.
-%%
-%% Once the path is possibly converted to a list of node names and conditions
-%% and udpated, it calls {@link khepri_machine:put/3}.
-%%
-%% @returns a single "ok" atom or an "error" tuple, unlike
-%% {@link khepri_machine:put/3}.
-%%
-%% @see khepri_machine:put/3.
+%% @see update/5.
 
-update(StoreId, Path, Data) ->
-    Path1 = khepri_path:maybe_from_string(Path),
-    Path2 = khepri_path:combine_with_conditions(
-              Path1, [#if_node_exists{exists = true}]),
-    do_put(StoreId, Path2, Data).
+update(StoreId, PathPattern, Data) ->
+    update(StoreId, PathPattern, Data, #{}, #{}).
 
--spec compare_and_swap(Path, DataPattern, Data) -> ok | error() when
-      Path :: khepri_path:pattern() | string(),
-      DataPattern :: ets:match_pattern(),
-      Data :: khepri_machine:data().
-%% @doc Updates a specific tree node in the tree structure only if it already
-%% exists and its data matches the given `DataPattern'.
-%%
-%% Calling this function is the same as calling
-%% `compare_and_swap(StoreId, Path, DataPattern, Data)' with the default store
-%% ID.
-%%
-%% @see create/3.
-
-compare_and_swap(Path, DataPattern, Data) ->
-    compare_and_swap(?DEFAULT_RA_CLUSTER_NAME, Path, DataPattern, Data).
-
--spec compare_and_swap(StoreId, Path, DataPattern, Data) -> ok | error() when
+-spec update(StoreId, PathPattern, Data, Extra | Options) -> Result when
       StoreId :: store_id(),
-      Path :: khepri_path:pattern() | string(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Updates a specific tree node in the tree structure only if it already
+%% exists.
+%%
+%% Calling this function is the same as calling `update(StoreId, PathPattern,
+%% Data, Extra, Options)' with an empty `Extra' or `Options'.
+%%
+%% @see update/5.
+
+update(StoreId, PathPattern, Data, #{keep_while := _} = Extra) ->
+    update(StoreId, PathPattern, Data, Extra, #{});
+update(StoreId, PathPattern, Data, Options) ->
+    update(StoreId, PathPattern, Data, #{}, Options).
+
+-spec update(StoreId, PathPattern, Data, Extra, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Updates a specific tree node in the tree structure only if it already
+%% exists.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' is then modified to include an `#if_node_exists{exists =
+%% true}' condition on its last component.
+%%
+%% The provided data is embedded in a {@link khepri_machine:payload_data()} or
+%% {@link khepri_machine:payload_sproc()} record before it can be stored in
+%% the database.
+%%
+%% Once the path is normalized to a list of tree node names and conditions,
+%% and updated, it calls {@link khepri_machine:put/5}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the node to modify.
+%% @param Data the Erlang term or function to store.
+%% @param Extra extra options such as `keep_while' conditions.
+%% @param Options command options such as the command type.
+%%
+%% @returns in the case of a synchronous put, an "ok" tuple with a map with one
+%% entry, or an "error" tuple; in the case of an asynchronous put, always `ok'
+%% (the actual return value may be sent by a message if a correlation ID was
+%% specified).
+%%
+%% @see khepri_machine:put/5.
+
+update(StoreId, PathPattern, Data, Extra, Options) ->
+    PathPattern1 = khepri_path:from_string(PathPattern),
+    PathPattern2 = khepri_path:combine_with_conditions(
+                     PathPattern1, [#if_node_exists{exists = true}]),
+    do_put(StoreId, PathPattern2, Data, Extra, Options).
+
+-spec compare_and_swap(PathPattern, DataPattern, Data) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
       DataPattern :: ets:match_pattern(),
-      Data :: khepri_machine:data().
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Result :: khepri_machine:result().
 %% @doc Updates a specific tree node in the tree structure only if it already
 %% exists and its data matches the given `DataPattern'.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
+%% Calling this function is the same as calling `compare_and_swap(StoreId,
+%% PathPattern, DataPattern, Data)' with the default store ID.
 %%
-%% The `Path' is the modified to include a
-%% `#if_data_matches{pattern = DataPattern}' condition on its last component.
-%%
-%% Once the path is possibly converted to a list of node names and conditions
-%% and udpated, it calls {@link khepri_machine:put/3}.
-%%
-%% @returns a single "ok" atom or an "error" tuple, unlike
-%% {@link khepri_machine:put/3}.
-%%
-%% @see khepri_machine:put/3.
+%% @see compare_and_swap/4.
 
-compare_and_swap(StoreId, Path, DataPattern, Data) ->
-    Path1 = khepri_path:maybe_from_string(Path),
-    Path2 = khepri_path:combine_with_conditions(
-              Path1, [#if_data_matches{pattern = DataPattern}]),
-    do_put(StoreId, Path2, Data).
+compare_and_swap(PathPattern, DataPattern, Data) ->
+    compare_and_swap(?DEFAULT_RA_CLUSTER_NAME, PathPattern, DataPattern, Data).
 
--spec do_put(
-        store_id(), khepri_path:pattern() | string(), khepri_machine:data()) ->
-    ok | error().
-%% @doc Calls {@link khepri_machine:put/3} and simplifies the return value.
+-spec compare_and_swap(StoreId, PathPattern, DataPattern, Data) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      DataPattern :: ets:match_pattern(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Result :: khepri_machine:result().
+%% @doc Updates a specific tree node in the tree structure only if it already
+%% exists and its data matches the given `DataPattern'.
 %%
-%% The "ok" tuple is converted to a single "ok" atom, getting rid of the map
-%% of entries.
+%% Calling this function is the same as calling `compare_and_swap(StoreId,
+%% PathPattern, DataPattern, Data, #{}, #{})'.
 %%
-%% The "error" tuple is left unmodified.
+%% @see compare_and_swap/6.
+
+compare_and_swap(StoreId, PathPattern, DataPattern, Data) ->
+    compare_and_swap(StoreId, PathPattern, DataPattern, Data, #{}, #{}).
+
+-spec compare_and_swap(
+        StoreId, PathPattern, DataPattern, Data, Extra | Options) ->
+    Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      DataPattern :: ets:match_pattern(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Updates a specific tree node in the tree structure only if it already
+%% exists and its data matches the given `DataPattern'.
+%%
+%% Calling this function is the same as calling `compare_and_swap(StoreId,
+%% PathPattern, DataPattern, Data, Extra, Options)' with an empty `Extra' or
+%% `Options'.
+%%
+%% @see compare_and_swap/6.
+
+compare_and_swap(
+  StoreId, PathPattern, DataPattern, Data, #{keep_while := _} = Extra) ->
+    compare_and_swap(StoreId, PathPattern, DataPattern, Data, Extra, #{});
+compare_and_swap(StoreId, PathPattern, DataPattern, Data, Options) ->
+    compare_and_swap(StoreId, PathPattern, DataPattern, Data, #{}, Options).
+
+-spec compare_and_swap(
+        StoreId, PathPattern, DataPattern, Data, Extra, Options) ->
+    Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      DataPattern :: ets:match_pattern(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Updates a specific tree node in the tree structure only if it already
+%% exists and its data matches the given `DataPattern'.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' is then modified to include an `#if_data_matches{pattern
+%% = DataPattern}' condition on its last component.
+%%
+%% The provided data is embedded in a {@link khepri_machine:payload_data()} or
+%% {@link khepri_machine:payload_sproc()} record before it can be stored in
+%% the database.
+%%
+%% Once the path is normalized to a list of tree node names and conditions,
+%% and updated, it calls {@link khepri_machine:put/5}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the node to modify.
+%% @param Data the Erlang term or function to store.
+%% @param Extra extra options such as `keep_while' conditions.
+%% @param Options command options such as the command type.
+%%
+%% @returns in the case of a synchronous put, an "ok" tuple with a map with one
+%% entry, or an "error" tuple; in the case of an asynchronous put, always `ok'
+%% (the actual return value may be sent by a message if a correlation ID was
+%% specified).
+%%
+%% @see khepri_machine:put/5.
+
+compare_and_swap(StoreId, PathPattern, DataPattern, Data, Extra, Options) ->
+    PathPattern1 = khepri_path:from_string(PathPattern),
+    PathPattern2 = khepri_path:combine_with_conditions(
+                     PathPattern1, [#if_data_matches{pattern = DataPattern}]),
+    do_put(StoreId, PathPattern2, Data, Extra, Options).
+
+-spec do_put(StoreId, PathPattern, Payload, Extra, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Payload :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Prepares the payload and calls {@link khepri_machine:put/5}.
 %%
 %% @private
 
-do_put(StoreId, Path, Fun) when is_function(Fun) ->
-    case khepri_machine:put(StoreId, Path, #kpayload_sproc{sproc = Fun}) of
-        {ok, _} -> ok;
-        Error   -> Error
-    end;
-do_put(StoreId, Path, Data) ->
-    case khepri_machine:put(StoreId, Path, #kpayload_data{data = Data}) of
-        {ok, _} -> ok;
-        Error   -> Error
-    end.
+do_put(StoreId, PathPattern, Payload, Extra, Options) ->
+    Payload1 = wrap_payload(Payload),
+    khepri_machine:put(StoreId, PathPattern, Payload1, Extra, Options).
 
--spec clear_payload(Path) -> ok | error() when
-      Path :: khepri_path:pattern() | string().
-%% @doc Clears the payload of an existing specific tree node in the tree structure.
+-spec wrap_payload(Payload) -> WrappedPayload when
+      Payload :: khepri_machine:payload() | khepri_machine:data() | fun(),
+      WrappedPayload :: khepri_machine:payload().
+%% @doc Ensures the payload is wrapped in one of the internal types.
 %%
-%% Calling this function is the same as calling
-%% `clear_payload(StoreId, Path)' with the default store ID.
+%% The internal types make sure we avoid any collision between any
+%% user-provided terms and internal structures.
 %%
-%% @see create/3.
+%% @param Payload an already wrapped payload, or any term which needs to be
+%%        wrapped.
+%%
+%% @returns the wrapped payload.
 
-clear_payload(Path) ->
-    clear_payload(?DEFAULT_RA_CLUSTER_NAME, Path).
+wrap_payload(Payload) when ?IS_KHEPRI_PAYLOAD(Payload) ->
+    Payload;
+wrap_payload(Fun) when is_function(Fun) ->
+    #kpayload_sproc{sproc = Fun};
+wrap_payload(Data) ->
+    #kpayload_data{data = Data}.
 
--spec clear_payload(StoreId, Path) -> ok | error() when
+-spec clear_payload(PathPattern) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result().
+%% @doc Clears the payload of an existing specific tree node in the tree
+%% structure.
+%%
+%% Calling this function is the same as calling `clear_payload(StoreId,
+%% PathPattern)' with the default store ID.
+%%
+%% @see clear_payload/2.
+
+clear_payload(PathPattern) ->
+    clear_payload(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
+
+-spec clear_payload(StoreId, PathPattern) -> Result when
       StoreId :: store_id(),
-      Path :: khepri_path:pattern() | string().
-%% @doc Clears the payload of an existing specific tree node in the tree structure.
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result().
+%% @doc Clears the payload of an existing specific tree node in the tree
+%% structure.
 %%
-%% In other words, the payload is set to `none'.
+%% Calling this function is the same as calling `clear_payload(StoreId,
+%% PathPattern, #{}, #{})'.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
-%%
-%% Once the path is possibly converted to a list of node names and conditions
-%% and udpated, it calls {@link khepri_machine:put/3}.
-%%
-%% @returns a single "ok" atom or an "error" tuple, unlike
-%% {@link khepri_machine:put/3}.
-%%
-%% @see khepri_machine:put/3.
+%% @see clear_payload/4.
 
-clear_payload(StoreId, Path) ->
-    Path1 = khepri_path:maybe_from_string(Path),
-    case khepri_machine:put(StoreId, Path1, none) of
-        {ok, _} -> ok;
-        Error   -> Error
-    end.
+clear_payload(StoreId, PathPattern) ->
+    clear_payload(StoreId, PathPattern, #{}, #{}).
 
--spec delete(PathPattern) -> ok | error() when
-      PathPattern :: khepri_path:pattern() | string().
+-spec clear_payload(StoreId, PathPattern, Extra | Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Clears the payload of an existing specific tree node in the tree
+%% structure.
+%%
+%% Calling this function is the same as calling `clear_payload(StoreId,
+%% PathPattern, Extra, Options)' with an empty `Extra' or `Options'.
+%%
+%% @see clear_payload/4.
+
+clear_payload(StoreId, PathPattern, #{keep_while := _} = Extra) ->
+    clear_payload(StoreId, PathPattern, Extra, #{});
+clear_payload(StoreId, PathPattern, Options) ->
+    clear_payload(StoreId, PathPattern, #{}, Options).
+
+-spec clear_payload(StoreId, PathPattern, Extra, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Extra :: #{keep_while => khepri_machine:keep_while_conds_map()},
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Clears the payload of an existing specific tree node in the tree
+%% structure.
+%%
+%% In other words, the payload is set to `?NO_PAYLOAD'.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% Once the path is normalized to a list of tree node names and conditions,
+%% and updated, it calls {@link khepri_machine:put/5}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the node to modify.
+%% @param Extra extra options such as `keep_while' conditions.
+%% @param Options command options such as the command type.
+%%
+%% @returns in the case of a synchronous put, an "ok" tuple with a map with one
+%% entry, or an "error" tuple; in the case of an asynchronous put, always `ok'
+%% (the actual return value may be sent by a message if a correlation ID was
+%% specified).
+%%
+%% @see khepri_machine:put/5.
+
+clear_payload(StoreId, PathPattern, Extra, Options) ->
+    khepri_machine:put(StoreId, PathPattern, ?NO_PAYLOAD, Extra, Options).
+
+-spec delete(PathPattern) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result().
 %% @doc Deletes all tree nodes matching the path pattern.
 %%
-%% Calling this function is the same as calling
-%% `delete(StoreId, PathPattern)' with
-%% the default store ID.
+%% Calling this function is the same as calling `delete(StoreId, PathPattern)'
+%% with the default store ID.
 %%
 %% @see delete/2.
 
-delete(Path) ->
-    delete(?DEFAULT_RA_CLUSTER_NAME, Path).
+delete(PathPattern) ->
+    delete(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
 
--spec delete(StoreId, PathPattern) -> ok | error() when
+-spec delete
+(StoreId, PathPattern) -> Result when
       StoreId :: store_id(),
-      PathPattern :: khepri_path:pattern() | string().
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result();
+(PathPattern, Options) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result().
+
 %% @doc Deletes all tree nodes matching the path pattern.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`delete(StoreId, PathPattern)'. Calling it is the same as calling
+%% `delete(StoreId, PathPattern, #{})'.</li>
+%% <li>`delete(PathPattern, Options)'. Calling it is the same as calling
+%% `delete(StoreId, PathPattern, Options)' with the default store ID.</li>
+%% </ul>
 %%
-%% Once the path is possibly converted to a list of node names and conditions,
-%% it calls {@link khepri_machine:delete/2}.
-%%
-%% @returns a single "ok" atom or an "error" tuple, unlike
-%% {@link khepri_machine:delete/2}.
-%%
-%% @see delete/2.
+%% @see delete/3.
 
-delete(StoreId, Path) ->
-    Path1 = khepri_path:maybe_from_string(Path),
-    case khepri_machine:delete(StoreId, Path1) of
-        {ok, _} -> ok;
-        Error   -> Error
+delete(StoreId, PathPattern) when is_atom(StoreId) ->
+    delete(StoreId, PathPattern, #{});
+delete(PathPattern, Options) when is_map(Options) ->
+    delete(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Options).
+
+-spec delete(StoreId, PathPattern, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result() | NoRetIfAsync,
+      NoRetIfAsync :: ok.
+%% @doc Deletes all tree nodes matching the path pattern.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% Once the path is normalized to a list of tree node names and conditions,
+%% and updated, it calls {@link khepri_machine:put/5}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to delete.
+%% @param Options command options such as the command type.
+%%
+%% @returns in the case of a synchronous delete, an "ok" tuple with a map with
+%% zero, one or more entries, or an "error" tuple; in the case of an
+%% asynchronous put, always `ok' (the actual return value may be sent by a
+%% message if a correlation ID was specified).
+%%
+%% @see khepri_machine:delete/3.
+
+delete(StoreId, PathPattern, Options) ->
+    khepri_machine:delete(StoreId, PathPattern, Options).
+
+-spec exists(PathPattern) -> Exists when
+      PathPattern :: khepri_path:pattern() | string(),
+      Exists :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path exists,
+%% otherwise `false'.
+%%
+%% Calling this function is the same as calling `exists(StoreId, PathPattern)'
+%% with the default store ID.
+%%
+%% @see exists/2.
+
+exists(PathPattern) ->
+    exists(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
+
+-spec exists
+(StoreId, PathPattern) -> Exists when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Exists :: boolean();
+(PathPattern, Options) -> Exists when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Exists :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path exists,
+%% otherwise `false'.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`exists(StoreId, PathPattern)'. Calling it is the same as calling
+%% `exists(StoreId, PathPattern, #{})'.</li>
+%% <li>`exists(PathPattern, Options)'. Calling it is the same as calling
+%% `exists(StoreId, PathPattern, Options)' with the default store ID.</li>
+%% </ul>
+%%
+%% @see exists/3.
+
+exists(StoreId, PathPattern) when is_atom(StoreId) ->
+    exists(StoreId, PathPattern, #{});
+exists(PathPattern, Options) when is_map(Options) ->
+    exists(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Options).
+
+-spec exists(StoreId, PathPattern, Options) -> Exists when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Exists :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path exists,
+%% otherwise `false'.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' must point to a specific tree node and can't match
+%% multiple nodes.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:get/3}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to check.
+%% @param Options query options such as `favor'.
+%%
+%% @see khepri_machine:get/3.
+
+exists(StoreId, PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(StoreId, PathPattern, Options1) of
+        {ok, _} -> true;
+        _       -> false
     end.
 
 -spec get(PathPattern) -> Result when
@@ -464,13 +870,13 @@ delete(StoreId, Path) ->
       Result :: khepri_machine:result().
 %% @doc Returns all tree nodes matching the path pattern.
 %%
-%% Calling this function is the same as calling
-%% `get(StoreId, PathPattern)' with the default store ID.
+%% Calling this function is the same as calling `get(StoreId, PathPattern)'
+%% with the default store ID.
 %%
-%% @see get/3.
+%% @see get/2.
 
-get(Path) ->
-    get(?DEFAULT_RA_CLUSTER_NAME, Path).
+get(PathPattern) ->
+    get(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
 
 -spec get
 (StoreId, PathPattern) -> Result when
@@ -485,18 +891,18 @@ get(Path) ->
 %%
 %% This function accepts the following two forms:
 %% <ul>
-%% <li>`get(StoreId, Path)'. Calling it is the same as calling
+%% <li>`get(StoreId, PathPattern)'. Calling it is the same as calling
 %% `get(StoreId, PathPattern, #{})'.</li>
-%% <li>`get(Path, Options'. Calling it is the same as calling
-%% `get(StoreId, PathPattern, #{})' with the default store ID.</li>
+%% <li>`get(PathPattern, Options)'. Calling it is the same as calling
+%% `get(StoreId, PathPattern, Options)' with the default store ID.</li>
 %% </ul>
 %%
 %% @see get/3.
 
-get(StoreId, Path) when is_atom(StoreId) ->
-    get(StoreId, Path, #{});
-get(Path, Options) when is_map(Options) ->
-    get(?DEFAULT_RA_CLUSTER_NAME, Path, Options).
+get(StoreId, PathPattern) when is_atom(StoreId) ->
+    get(StoreId, PathPattern, #{});
+get(PathPattern, Options) when is_map(Options) ->
+    get(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Options).
 
 -spec get(StoreId, PathPattern, Options) -> Result when
       StoreId :: store_id(),
@@ -505,86 +911,91 @@ get(Path, Options) when is_map(Options) ->
       Result :: khepri_machine:result().
 %% @doc Returns all tree nodes matching the path pattern.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
 %%
-%% Once the path is possibly converted to a list of node names and conditions,
-%% it calls {@link khepri_machine:get/3}.
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:get/3}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to get.
+%% @param Options query options such as `favor'.
+%%
+%% @returns an "ok" tuple with a map with zero, one or more entries, or an
+%% "error" tuple.
 %%
 %% @see khepri_machine:get/3.
 
-get(StoreId, Path, Options) ->
-    Path1 = khepri_path:maybe_from_string(Path),
-    khepri_machine:get(StoreId, Path1, Options).
+get(StoreId, PathPattern, Options) ->
+    khepri_machine:get(StoreId, PathPattern, Options).
 
--spec exists(Path) -> Exists when
-      Path :: khepri_path:pattern() | string(),
-      Exists :: boolean().
-%% @doc Returns `true' if the tree node pointed to by the given path exists,
-%% otherwise `false'.
-%%
-%% Calling this function is the same as calling
-%% `exists(StoreId, Path)' with the default store ID.
-%%
-%% @see exists/2.
-
-exists(Path) ->
-    exists(?DEFAULT_RA_CLUSTER_NAME, Path).
-
--spec exists(StoreId, Path) -> Exists when
-      StoreId :: store_id(),
-      Path :: khepri_path:pattern() | string(),
-      Exists :: boolean().
-%% @doc Returns `true' if the tree node pointed to by the given path exists,
-%% otherwise `false'.
-%%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
-%%
-%% The `Path' must point to a specific tree node and can't match multiple nodes.
-%%
-%% This function calls {@link get/3} and interpret its result.
-%%
-%% @see get/3.
-
-exists(StoreId, Path) ->
-    case get(StoreId, Path, #{expect_specific_node => true}) of
-        {ok, _} -> true;
-        _       -> false
-    end.
-
--spec has_data(Path) -> HasData when
-      Path :: khepri_path:pattern() | string(),
+-spec has_data(PathPattern) -> HasData when
+      PathPattern :: khepri_path:pattern() | string(),
       HasData :: boolean().
-%% @doc Returns `true' if the tree node pointed to by the given path has a data
-%% payload, otherwise `false'.
+%% @doc Returns `true' if the tree node pointed to by the given path has data,
+%% otherwise `false'.
 %%
-%% Calling this function is the same as calling
-%% `has_data(StoreId, Path)' with the default store ID.
+%% Calling this function is the same as calling `has_data(StoreId,
+%% PathPattern)' with the default store ID.
 %%
 %% @see has_data/2.
 
-has_data(Path) ->
-    has_data(?DEFAULT_RA_CLUSTER_NAME, Path).
+has_data(PathPattern) ->
+    has_data(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
 
--spec has_data(StoreId, Path) -> HasData when
+-spec has_data
+(StoreId, PathPattern) -> HasData when
       StoreId :: store_id(),
-      Path :: khepri_path:pattern() | string(),
+      PathPattern :: khepri_path:pattern() | string(),
+      HasData :: boolean();
+(PathPattern, Options) -> HasData when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
       HasData :: boolean().
-%% @doc Returns `true' if the tree node pointed to by the given path has a data
-%% payload, otherwise `false'.
+%% @doc Returns `true' if the tree node pointed to by the given path has data,
+%% otherwise `false'.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`has_data(StoreId, PathPattern)'. Calling it is the same as calling
+%% `has_data(StoreId, PathPattern, #{})'.</li>
+%% <li>`has_data(PathPattern, Options)'. Calling it is the same as calling
+%% `has_data(StoreId, PathPattern, Options)' with the default store ID.</li>
+%% </ul>
 %%
-%% The `Path' must point to a specific tree node and can't match multiple nodes.
-%%
-%% This function calls {@link get/3} and interpret its result.
-%%
-%% @see get/3.
+%% @see has_data/3.
 
-has_data(StoreId, Path) ->
-    case get(StoreId, Path, #{expect_specific_node => true}) of
+has_data(StoreId, PathPattern) when is_atom(StoreId) ->
+    has_data(StoreId, PathPattern, #{});
+has_data(PathPattern, Options) when is_map(Options) ->
+    has_data(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Options).
+
+-spec has_data(StoreId, PathPattern, Options) -> HasData when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      HasData :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path has data,
+%% otherwise `false'.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' must point to a specific tree node and can't match
+%% multiple nodes.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:get/3}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to check.
+%% @param Options query options such as `favor'.
+%%
+%% @see khepri_machine:get/3.
+
+has_data(StoreId, PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(StoreId, PathPattern, Options1) of
         {ok, Result} ->
             [NodeProps] = maps:values(Result),
             maps:is_key(data, NodeProps);
@@ -592,51 +1003,436 @@ has_data(StoreId, Path) ->
             false
     end.
 
--spec list(khepri_path:pattern() | string()) ->
-    khepri_machine:result().
+-spec get_data(PathPattern) -> Data when
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:data().
+%% @doc Returns the data associated with the given node path.
+%%
+%% Calling this function is the same as calling `get_data(StoreId,
+%% PathPattern)' with the default store ID.
+%%
+%% @see get_data/2.
 
-list(Path) ->
-    list(?DEFAULT_RA_CLUSTER_NAME, Path).
+get_data(PathPattern) ->
+    get_data(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
 
--spec list(store_id(), khepri_path:pattern() | string()) ->
-    khepri_machine:result().
+-spec get_data
+(StoreId, PathPattern) -> Data when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:data();
+(PathPattern, Options) -> Data when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Data :: khepri_machine:data().
+%% @doc Returns the data associated with the given node path.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`get_data(StoreId, PathPattern)'. Calling it is the same as calling
+%% `get_data(StoreId, PathPattern, #{})'.</li>
+%% <li>`get_data(PathPattern, Options)'. Calling it is the same as calling
+%% `get_data(StoreId, PathPattern, Options)' with the default store ID.</li>
+%% </ul>
+%%
+%% @see get_data/3.
 
-list(StoreId, Path) ->
-    Path1 = khepri_path:maybe_from_string(Path),
-    Path2 = [?ROOT_NODE | Path1] ++ [?STAR],
-    khepri_machine:get(StoreId, Path2).
+get_data(StoreId, PathPattern) when is_atom(StoreId) ->
+    get_data(StoreId, PathPattern, #{});
+get_data(PathPattern, Options) when is_map(Options) ->
+    get_data(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Options).
 
--spec find(Path, Condition) ->
-    Result when
-      Path :: khepri_path:pattern() | string(),
+-spec get_data(StoreId, PathPattern, Options) -> Data when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Data :: khepri_machine:data().
+%% @doc Returns the data associated with the given node path.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' must point to a specific tree node and can't match
+%% multiple nodes.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:get/3}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to check.
+%% @param Options query options such as `favor'.
+%%
+%% @returns the data if the node has a data payload, or throws an exception
+%% otherwise.
+%%
+%% @see khepri_machine:get/3.
+
+get_data(StoreId, PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(StoreId, PathPattern, Options1) of
+        {ok, Result} ->
+            [{Path, NodeProps}] = maps:to_list(Result),
+            case NodeProps of
+                #{data := Data} -> Data;
+                _               -> throw({no_data, Path, NodeProps})
+            end;
+        Error ->
+            throw(Error)
+    end.
+
+-spec has_sproc(PathPattern) -> HasStoredProc when
+      PathPattern :: khepri_path:pattern() | string(),
+      HasStoredProc :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path holds a
+%% stored procedure, otherwise `false'.
+%%
+%% Calling this function is the same as calling `has_sproc(StoreId,
+%% PathPattern)' with the default store ID.
+%%
+%% @see has_sproc/2.
+
+has_sproc(PathPattern) ->
+    has_sproc(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
+
+-spec has_sproc
+(StoreId, PathPattern) -> HasStoredProc when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      HasStoredProc :: boolean();
+(PathPattern, Options) -> HasStoredProc when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      HasStoredProc :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path holds a
+%% stored procedure, otherwise `false'.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`has_sproc(StoreId, PathPattern)'. Calling it is the same as calling
+%% `has_sproc(StoreId, PathPattern, #{})'.</li>
+%% <li>`has_sproc(PathPattern, Options)'. Calling it is the same as calling
+%% `has_sproc(StoreId, PathPattern, Options)' with the default store ID.</li>
+%% </ul>
+%%
+%% @see has_sproc/3.
+
+has_sproc(StoreId, PathPattern) when is_atom(StoreId) ->
+    has_sproc(StoreId, PathPattern, #{});
+has_sproc(PathPattern, Options) when is_map(Options) ->
+    has_sproc(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Options).
+
+-spec has_sproc(StoreId, PathPattern, Options) -> HasStoredProc when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      HasStoredProc :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path holds a
+%% stored procedure, otherwise `false'.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' must point to a specific tree node and can't match
+%% multiple nodes.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:get/3}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to check.
+%% @param Options query options such as `favor'.
+%%
+%% @see khepri_machine:get/3.
+
+has_sproc(StoreId, PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(StoreId, PathPattern, Options1) of
+        {ok, Result} ->
+            [NodeProps] = maps:values(Result),
+            maps:is_key(sproc, NodeProps);
+        _ ->
+            false
+    end.
+
+-spec run_sproc(PathPattern, Args) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Args :: list(),
+      Result :: any().
+%% @doc Runs the stored procedure pointed to by the given path and returns the
+%% result.
+%%
+%% Calling this function is the same as calling `run_sproc(StoreId,
+%% PathPattern, Args)' with the default store ID.
+%%
+%% @see run_sproc/3.
+
+run_sproc(PathPattern, Args) ->
+    run_sproc(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Args).
+
+-spec run_sproc
+(StoreId, PathPattern, Args) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Args :: list(),
+      Result :: any();
+(PathPattern, Args, Options) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Args :: list(),
+      Options :: khepri_machine:query_options(),
+      Result :: any().
+%% @doc Runs the stored procedure pointed to by the given path and returns the
+%% result.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`run_sproc(StoreId, PathPattern, Args)'. Calling it is the same as
+%% calling `run_sproc(StoreId, PathPattern, Args, #{})'.</li>
+%% <li>`run_sproc(PathPattern, Args, Options)'. Calling it is the same as
+%% calling `run_sproc(StoreId, PathPattern, Args, Options)' with the default
+%% store ID.</li>
+%% </ul>
+%%
+%% @see run_sproc/3.
+
+run_sproc(StoreId, PathPattern, Args) when is_atom(StoreId) ->
+    run_sproc(StoreId, PathPattern, Args, #{});
+run_sproc(PathPattern, Args, Options) when is_map(Options) ->
+    run_sproc(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Args, Options).
+
+-spec run_sproc(StoreId, PathPattern, Args, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Args :: list(),
+      Options :: khepri_machine:query_options(),
+      Result :: any().
+%% @doc Runs the stored procedure pointed to by the given path and returns the
+%% result.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' must point to a specific tree node and can't match
+%% multiple nodes.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:get/3}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to check.
+%% @param Args the list of arguments to pass to the stored procedure.
+%% @param Options query options such as `favor'.
+%%
+%% @returns the result of the stored procedure execution.
+%%
+%% @see khepri_machine:run_sproc/3.
+
+run_sproc(StoreId, PathPattern, Args, Options) ->
+    khepri_machine:run_sproc(StoreId, PathPattern, Args, Options).
+
+-spec register_trigger(TriggerId, EventFilter, StoredProcPath) -> Ret when
+      TriggerId :: khepri_machine:trigger_id(),
+      EventFilter :: khepri_machine:event_filter(),
+      StoredProcPath :: khepri_path:path() | string(),
+      Ret :: ok | error().
+%% @doc Registers a trigger.
+%%
+%% Calling this function is the same as calling `register_trigger(StoreId,
+%% TriggerId, EventFilter, StoredProcPath)' with the default store ID.
+%%
+%% @see register_trigger/4.
+
+register_trigger(TriggerId, EventFilter, StoredProcPath) ->
+    register_trigger(
+      ?DEFAULT_RA_CLUSTER_NAME, TriggerId, EventFilter, StoredProcPath).
+
+-spec register_trigger
+(StoreId, TriggerId, EventFilter, StoredProcPath) -> Ret when
+      StoreId :: khepri:store_id(),
+      TriggerId :: khepri_machine:trigger_id(),
+      EventFilter :: khepri_machine:event_filter(),
+      StoredProcPath :: khepri_path:path() | string(),
+      Ret :: ok | error();
+(TriggerId, EventFilter, StoredProcPath, Options) -> Ret when
+      TriggerId :: khepri_machine:trigger_id(),
+      EventFilter :: khepri_machine:event_filter(),
+      StoredProcPath :: khepri_path:path() | string(),
+      Options :: khepri_machine:command_options(),
+      Ret :: ok | error().
+%% @doc Registers a trigger.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath)'.
+%% Calling it is the same as calling `register_trigger(StoreId, TriggerId,
+%% EventFilter, StoredProcPath, #{})'.</li>
+%% <li>`register_trigger(TriggerId, EventFilter, StoredProcPath, Options)'.
+%% Calling it is the same as calling `register_trigger(StoreId, TriggerId,
+%% EventFilter, StoredProcPath, Options)' with the default store ID.</li>
+%% </ul>
+%%
+%% @see register_trigger/5.
+
+register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath)
+  when is_atom(StoreId) ->
+    register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath, #{});
+register_trigger(TriggerId, EventFilter, StoredProcPath, Options)
+  when is_map(Options) ->
+    register_trigger(
+      ?DEFAULT_RA_CLUSTER_NAME, TriggerId, EventFilter, StoredProcPath,
+      Options).
+
+-spec register_trigger(
+        StoreId, TriggerId, EventFilter, StoredProcPath, Options) ->
+    Ret when
+      StoreId :: khepri:store_id(),
+      TriggerId :: khepri_machine:trigger_id(),
+      EventFilter :: khepri_machine:event_filter(),
+      StoredProcPath :: khepri_path:path() | string(),
+      Options :: khepri_machine:command_options(),
+      Ret :: ok | error().
+%% @doc Registers a trigger.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param TriggerId the name of the trigger.
+%% @param EventFilter the event filter used to associate an event with a
+%%        stored procedure.
+%% @param StoredProcPath the path to the stored procedure to execute when the
+%%        corresponding event occurs.
+%%
+%% @returns `ok' if the trigger was registered, an "error" tuple otherwise.
+%%
+%% @see khepri_machine:register_trigger/5.
+
+register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath, Options) ->
+    khepri_machine:register_trigger(
+      StoreId, TriggerId, EventFilter, StoredProcPath, Options).
+
+-spec list(PathPattern) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result().
+%% @doc Returns all direct child nodes under the given path.
+%%
+%% Calling this function is the same as calling `list(StoreId, PathPattern)'
+%% with the default store ID.
+%%
+%% @see list/2.
+
+list(PathPattern) ->
+    list(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
+
+-spec list
+(StoreId, PathPattern) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result();
+(PathPattern, Options) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Result :: khepri_machine:result().
+%% @doc Returns all direct child nodes under the given path.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`list(StoreId, PathPattern)'. Calling it is the same as calling
+%% `list(StoreId, PathPattern, #{})'.</li>
+%% <li>`list(PathPattern, Options)'. Calling it is the same as calling
+%% `list(StoreId, PathPattern, Options)' with the default store ID.</li>
+%% </ul>
+%%
+%% @see list/3.
+
+list(StoreId, PathPattern) when is_atom(StoreId) ->
+    list(StoreId, PathPattern, #{});
+list(PathPattern, Options) when is_map(Options) ->
+    list(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Options).
+
+-spec list(StoreId, PathPattern, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Result :: khepri_machine:result().
+%% @doc Returns all direct child nodes under the given path.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:get/3}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to get.
+%% @param Options query options such as `favor'.
+%%
+%% @returns an "ok" tuple with a map with zero, one or more entries, or an
+%% "error" tuple.
+%%
+%% @see khepri_machine:get/3.
+
+list(StoreId, PathPattern, Options) ->
+    PathPattern1 = khepri_path:from_string(PathPattern),
+    PathPattern2 = [?ROOT_NODE | PathPattern1] ++ [?STAR],
+    get(StoreId, PathPattern2, Options).
+
+-spec find(PathPattern, Condition) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
       Condition :: khepri_path:pattern_component(),
       Result :: khepri_machine:result().
-%% @doc Finds tree nodes below `Path' which match the given `Condition'.
+%% @doc Returns all tree nodes matching the path pattern.
 %%
-%% This function operates on the default store.
+%% Calling this function is the same as calling `find(StoreId, PathPattern)'
+%% with the default store ID.
 %%
 %% @see find/3.
 
-find(Path, Condition) ->
-    find(?DEFAULT_RA_CLUSTER_NAME, Path, Condition).
+find(PathPattern, Condition) ->
+    find(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Condition).
 
--spec find(StoreId, Path, Condition) ->
-    Result when
+-spec find
+(StoreId, PathPattern, Condition) -> Result when
       StoreId :: store_id(),
-      Path :: khepri_path:pattern() | string(),
+      PathPattern :: khepri_path:pattern() | string(),
       Condition :: khepri_path:pattern_component(),
+      Result :: khepri_machine:result();
+(PathPattern, Condition, Options) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Condition :: khepri_path:pattern_component(),
+      Options :: khepri_machine:query_options(),
       Result :: khepri_machine:result().
-%% @doc Finds tree nodes under `Path' which match the given `Condition'.
+%% @doc Returns all tree nodes matching the path pattern.
 %%
-%% The `Path' can be provided as a list of node names and conditions or as a
-%% string. See {@link khepri_path:from_string/1}.
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`find(StoreId, PathPattern, Condition)'. Calling it is the same as
+%% calling `find(StoreId, PathPattern, Condition, #{})'.</li>
+%% <li>`find(PathPattern, Condition, Options)'. Calling it is the same as
+%% calling `find(StoreId, PathPattern, Condition, Options)' with the default
+%% store ID.</li>
+%% </ul>
 %%
-%% Nodes are searched deeply under the given `Path', not only among direct
-%% child nodes.
+%% @see find/4.
+
+find(StoreId, PathPattern, Condition) when is_atom(StoreId) ->
+    find(StoreId, PathPattern, Condition, #{});
+find(PathPattern, Condition, Options) when is_map(Options) ->
+    find(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Condition, Options).
+
+-spec find(StoreId, PathPattern, Condition, Options) -> Result when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Condition :: khepri_path:pattern_component(),
+      Options :: khepri_machine:query_options(),
+      Result :: khepri_machine:result().
+%% @doc Finds tree nodes under `PathPattern' which match the given `Condition'.
+%%
+%% The `PathPattern' can be provided as a list of node names and conditions or
+%% as a string. See {@link khepri_path:from_string/1}.
+%%
+%% Nodes are searched deeply under the given `PathPattern', not only among
+%% direct child nodes.
 %%
 %% Example:
 %% ```
-%% %% Find nodes with data under `/foo/bar'.
+%% %% Find nodes with data under `/:foo/:bar'.
 %% Result = khepri:find(
 %%            ra_cluster_name,
 %%            [foo, bar],
@@ -654,23 +1450,29 @@ find(Path, Condition) ->
 %% '''
 %%
 %% @param StoreId the name of the Ra cluster.
-%% @param Path the path indicating where to start the search from.
+%% @param PathPattern the path indicating where to start the search from.
 %% @param Condition the condition nodes must match to be part of the result.
 %%
 %% @returns an "ok" tuple with a map with zero, one or more entries, or an
 %% "error" tuple.
 
-find(StoreId, Path, Condition) ->
+find(StoreId, PathPattern, Condition, Options) ->
     Condition1 = #if_all{conditions = [?STAR_STAR, Condition]},
-    Path1 = khepri_path:maybe_from_string(Path),
-    Path2 = [?ROOT_NODE | Path1] ++ [Condition1],
-    khepri_machine:get(StoreId, Path2).
+    PathPattern1 = khepri_path:from_string(PathPattern),
+    PathPattern2 = [?ROOT_NODE | PathPattern1] ++ [Condition1],
+    get(StoreId, PathPattern2, Options).
 
 -spec transaction(Fun) -> Ret when
       Fun :: khepri_tx:tx_fun(),
       Ret :: Atomic | Aborted,
       Atomic :: {atomic, khepri_tx:tx_fun_result()},
       Aborted :: khepri_tx:tx_abort().
+%% @doc Runs a transaction and returns its result.
+%%
+%% Calling this function is the same as calling `transaction(StoreId, Fun)'
+%% with the default store ID.
+%%
+%% @see transaction/2.
 
 transaction(Fun) ->
     transaction(?DEFAULT_RA_CLUSTER_NAME, Fun).
@@ -682,53 +1484,174 @@ transaction(Fun) ->
       Ret :: Atomic | Aborted,
       Atomic :: {atomic, khepri_tx:tx_fun_result()},
       Aborted :: khepri_tx:tx_abort();
-(Fun, ReadWrite) -> Ret when
+(Fun, ReadWriteOrOptions) -> Ret when
       Fun :: khepri_tx:tx_fun(),
+      ReadWriteOrOptions :: ReadWrite | Options,
       ReadWrite :: ro | rw | auto,
-      Ret :: Atomic | Aborted,
+      Options :: khepri_machine:command_options() |
+                 khepri_machine:query_options(),
+      Ret :: Atomic | Aborted | NoRetIfAsync,
       Atomic :: {atomic, khepri_tx:tx_fun_result()},
-      Aborted :: khepri_tx:tx_abort().
+      Aborted :: khepri_tx:tx_abort(),
+      NoRetIfAsync :: ok.
+%% @doc Runs a transaction and returns its result.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`transaction(StoreId, Fun)'. Calling it is the same as calling
+%% `transaction(StoreId, Fun, #{})'.</li>
+%% <li>`transaction(Fun, Options)'. Calling it is the same as calling
+%% `transaction(StoreId, Fun, Options)' with the default store ID.</li>
+%% </ul>
+%%
+%% @see transaction/3.
 
 transaction(StoreId, Fun) when is_function(Fun) ->
     transaction(StoreId, Fun, auto);
-transaction(Fun, ReadWrite) when is_function(Fun) ->
-    transaction(?DEFAULT_RA_CLUSTER_NAME, Fun, ReadWrite).
+transaction(Fun, ReadWriteOrOptions) when is_function(Fun) ->
+    transaction(?DEFAULT_RA_CLUSTER_NAME, Fun, ReadWriteOrOptions).
 
--spec transaction(StoreId, Fun, ReadWrite) -> Ret when
+-spec transaction
+(StoreId, Fun, ReadWrite) -> Ret when
       StoreId :: store_id(),
       Fun :: khepri_tx:tx_fun(),
       ReadWrite :: ro | rw | auto,
       Ret :: Atomic | Aborted,
       Atomic :: {atomic, khepri_tx:tx_fun_result()},
-      Aborted :: khepri_tx:tx_abort().
+      Aborted :: khepri_tx:tx_abort();
+(StoreId, Fun, Options) -> Ret when
+      StoreId :: store_id(),
+      Fun :: khepri_tx:tx_fun(),
+      Options :: khepri_machine:command_options() |
+                 khepri_machine:query_options(),
+      Ret :: Atomic | Aborted | NoRetIfAsync,
+      Atomic :: {atomic, khepri_tx:tx_fun_result()},
+      Aborted :: khepri_tx:tx_abort(),
+      NoRetIfAsync :: ok;
+(Fun, ReadWrite, Options) -> Ret when
+      Fun :: khepri_tx:tx_fun(),
+      ReadWrite :: ro | rw | auto,
+      Options :: khepri_machine:command_options() |
+                 khepri_machine:query_options(),
+      Ret :: Atomic | Aborted | NoRetIfAsync,
+      Atomic :: {atomic, khepri_tx:tx_fun_result()},
+      Aborted :: khepri_tx:tx_abort(),
+      NoRetIfAsync :: ok.
+%% @doc Runs a transaction and returns its result.
+%%
+%% This function accepts the following three forms:
+%% <ul>
+%% <li>`transaction(StoreId, PathPattern, ReadWrite)'. Calling it is the same
+%% as calling `transaction(StoreId, PathPattern, ReadWrite, #{})'.</li>
+%% <li>`transaction(StoreId, PathPattern, Options)'. Calling it is the same
+%% as calling `transaction(StoreId, PathPattern, auto, Options)'.</li>
+%% <li>`transaction(PathPattern, ReadWrite, Options)'. Calling it is the same
+%% as calling `transaction(StoreId, PathPattern, ReadWrite, Options)' with the
+%% default store ID.</li>
+%% </ul>
+%%
+%% @see transaction/4.
 
-transaction(StoreId, Fun, ReadWrite) ->
-    khepri_machine:transaction(StoreId, Fun, ReadWrite).
+transaction(StoreId, Fun, ReadWrite)
+  when is_atom(StoreId) andalso is_atom(ReadWrite) ->
+    transaction(StoreId, Fun, ReadWrite, #{});
+transaction(StoreId, Fun, Options)
+  when is_atom(StoreId) andalso is_map(Options) ->
+    transaction(StoreId, Fun, auto, Options);
+transaction(Fun, ReadWrite, Options)
+  when is_atom(ReadWrite) andalso is_map(Options) ->
+    transaction(
+      ?DEFAULT_RA_CLUSTER_NAME, Fun, ReadWrite, Options).
 
-run_sproc(Path, Args) ->
-    run_sproc(?DEFAULT_RA_CLUSTER_NAME, Path, Args).
+-spec transaction(StoreId, Fun, ReadWrite, Options) -> Ret when
+      StoreId :: store_id(),
+      Fun :: khepri_tx:tx_fun(),
+      ReadWrite :: ro | rw | auto,
+      Options :: khepri_machine:command_options() |
+                 khepri_machine:query_options(),
+      Ret :: Atomic | Aborted | NoRetIfAsync,
+      Atomic :: {atomic, khepri_tx:tx_fun_result()},
+      Aborted :: khepri_tx:tx_abort(),
+      NoRetIfAsync :: ok.
+%% @doc Runs a transaction and returns its result.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' must point to a specific tree node and can't match
+%% multiple nodes.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:transaction/4}.
+%%
+%% @see khepri_machine:transaction/4.
 
-run_sproc(StoreId, Path, Args) ->
-    khepri_machine:run_sproc(StoreId, Path, Args).
+transaction(StoreId, Fun, ReadWrite, Options) ->
+    khepri_machine:transaction(StoreId, Fun, ReadWrite, Options).
 
--spec clear_store() -> ok | error().
+-spec clear_store() -> Result when
+      Result :: khepri_machine:result().
+%% @doc Wipes out the entire tree.
+%%
+%% Calling this function is the same as calling `clear_store(StoreId)' with
+%% the default store ID.
+%%
+%% @see clear_store/1.
 
 clear_store() ->
     clear_store(?DEFAULT_RA_CLUSTER_NAME).
 
--spec clear_store(store_id()) -> ok | error().
+-spec clear_store
+(StoreId) -> Result when
+      StoreId :: store_id(),
+      Result :: khepri_machine:result();
+(Options) -> Result when
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result().
+%% @doc Wipes out the entire tree.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`clear_store(StoreId)'. Calling it is the same as calling
+%% `clear_store(StoreId, #{})'.</li>
+%% <li>`clear_store(Options)'. Calling it is the same as calling
+%% `clear_store(StoreId, Options)' with the default store ID.</li>
+%% </ul>
+%%
+%% @see clear_store/2.
 
-clear_store(StoreId) ->
-    delete(StoreId, [?STAR]).
+clear_store(StoreId) when is_atom(StoreId) ->
+    clear_store(StoreId, #{});
+clear_store(Options) when is_map(Options) ->
+    clear_store(?DEFAULT_RA_CLUSTER_NAME, Options).
 
--spec no_payload() -> none.
-%% @doc Returns `none'.
+-spec clear_store(StoreId, Options) -> Result when
+      StoreId :: store_id(),
+      Options :: khepri_machine:command_options(),
+      Result :: khepri_machine:result().
+%% @doc Wipes out the entire tree.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param Options command options such as the command type.
+%%
+%% @returns in the case of a synchronous delete, an "ok" tuple with a map with
+%% zero, one or more entries, or an "error" tuple; in the case of an
+%% asynchronous put, always `ok' (the actual return value may be sent by a
+%% message if a correlation ID was specified).
+%%
+%% @see delete/3.
+
+clear_store(StoreId, Options) ->
+    delete(StoreId, [?STAR], Options).
+
+-spec no_payload() -> ?NO_PAYLOAD.
+%% @doc Returns `?NO_PAYLOAD'.
 %%
 %% This is a helper for cases where using records is inconvenient, like in an
 %% Erlang shell.
 
 no_payload() ->
-    none.
+    ?NO_PAYLOAD.
 
 -spec data_payload(Term) -> Payload when
       Term :: khepri_machine:data(),
@@ -792,7 +1715,7 @@ info(StoreId) ->
             ok
     end,
 
-    case khepri_machine:get(StoreId, [#if_path_matches{regex = any}]) of
+    case get(StoreId, [?STAR_STAR]) of
         {ok, Result} ->
             io:format("~n\033[1;32m== TREE ==\033[0m~n~n●~n", []),
             Tree = khepri_utils:flat_struct_to_tree(Result),

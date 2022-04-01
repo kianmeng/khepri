@@ -74,15 +74,16 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -include("include/khepri.hrl").
+-include("src/khepri_fun.hrl").
 -include("src/internal.hrl").
 -include("src/khepri_machine.hrl").
 
--export([put/3, put/4, put/5,
-         get/2, get/3,
-         delete/2, delete/3,
-         transaction/2, transaction/3, transaction/4,
-         run_sproc/3,
-         register_trigger/4]).
+-export([put/5,
+         get/3,
+         delete/3,
+         transaction/4,
+         run_sproc/4,
+         register_trigger/5]).
 -export([get_keep_while_conds_state/1]).
 -export([init/1,
          apply/3,
@@ -163,7 +164,7 @@
 
 -type payload_sproc() :: #kpayload_sproc{}.
 
--type payload() :: none | payload_data() | payload_sproc().
+-type payload() :: ?NO_PAYLOAD | payload_data() | payload_sproc().
 %% All types of payload stored in the nodes of the tree structure.
 %%
 %% Beside the absence of payload, the only type of payload supported is data.
@@ -338,39 +339,6 @@
 %% TODO: Verify arguments carefully to avoid the construction of an invalid
 %% command.
 
--spec put(StoreId, PathPattern, Payload) -> Result when
-      StoreId :: khepri:store_id(),
-      PathPattern :: khepri_path:pattern() | string(),
-      Payload :: payload(),
-      Result :: result() | NoRetIfAsync,
-      NoRetIfAsync :: ok.
-%% @doc Creates or modifies a specific tree node in the tree structure.
-%%
-%% Calling this function is the same as calling
-%% `put(StoreId, PathPattern, Payload, #{}, #{})'.
-%%
-%% @see put/5.
-
-put(StoreId, PathPattern, Payload) ->
-    put(StoreId, PathPattern, Payload, #{}, #{}).
-
--spec put(StoreId, PathPattern, Payload, Extra | Options) -> Result when
-      StoreId :: khepri:store_id(),
-      PathPattern :: khepri_path:pattern() | string(),
-      Payload :: payload(),
-      Extra :: #{keep_while => keep_while_conds_map()},
-      Options :: command_options(),
-      Result :: result() | NoRetIfAsync,
-      NoRetIfAsync :: ok.
-%% @doc Creates or modifies a specific tree node in the tree structure.
-%%
-%% @see put/5.
-
-put(StoreId, PathPattern, Payload, #{keep_while := _} = Extra) ->
-    put(StoreId, PathPattern, Payload, Extra, #{});
-put(StoreId, PathPattern, Payload, Options) ->
-    put(StoreId, PathPattern, Payload, #{}, Options).
-
 -spec put(StoreId, PathPattern, Payload, Extra, Options) -> Result when
       StoreId :: khepri:store_id(),
       PathPattern :: khepri_path:pattern() | string(),
@@ -404,8 +372,11 @@ put(StoreId, PathPattern, Payload, Options) ->
 %%
 %% The payload must be one of the following form:
 %% <ul>
-%% <li>`none', meaning there will be no payload attached to the node</li>
+%% <li>`?NO_PAYLOAD', meaning there will be no payload attached to the
+%% node</li>
 %% <li>`#kpayload_data{data = Term}' to store any type of term in the
+%% node</li>
+%% <li>`#kpayload_sproc{sproc = Fun}' to store an anonymous function in the
 %% node</li>
 %% </ul>
 %%
@@ -446,7 +417,7 @@ put(StoreId, PathPattern, Payload, Extra, Options)
 put(_StoreId, PathPattern, Payload, _Extra, _Options) ->
     throw({invalid_payload, PathPattern, Payload}).
 
-prepare_payload(none = Payload) ->
+prepare_payload(?NO_PAYLOAD = Payload) ->
     Payload;
 prepare_payload(#kpayload_data{} = Payload) ->
     Payload;
@@ -454,20 +425,6 @@ prepare_payload(#kpayload_sproc{sproc = Fun} = Payload)
   when is_function(Fun) ->
     StandaloneFun = khepri_sproc:to_standalone_fun(Fun),
     Payload#kpayload_sproc{sproc = StandaloneFun}.
-
--spec get(StoreId, PathPattern) -> Result when
-      StoreId :: khepri:store_id(),
-      PathPattern :: khepri_path:pattern() | string(),
-      Result :: result().
-%% @doc Returns all tree nodes matching the path pattern.
-%%
-%% Calling this function is the same as calling
-%% `get(StoreId, PathPattern, #{})'.
-%%
-%% @see get/3.
-
-get(StoreId, PathPattern) ->
-    get(StoreId, PathPattern, #{}).
 
 -spec get(StoreId, PathPattern, Options) -> Result when
       StoreId :: khepri:store_id(),
@@ -509,21 +466,6 @@ get(StoreId, PathPattern, Options) ->
             end,
     process_query(StoreId, Query, Options).
 
--spec delete(StoreId, PathPattern) -> Result when
-      StoreId :: khepri:store_id(),
-      PathPattern :: khepri_path:pattern() | string(),
-      Result :: result() | NoRetIfAsync,
-      NoRetIfAsync :: ok.
-%% @doc Deletes all tree nodes matching the path pattern.
-%%
-%% Calling this function is the same as calling
-%% `delete(StoreId, PathPattern, #{})'.
-%%
-%% @see delete/3.
-
-delete(StoreId, PathPattern) ->
-    delete(StoreId, PathPattern, #{}).
-
 -spec delete(StoreId, PathPattern, Options) -> Result when
       StoreId :: khepri:store_id(),
       PathPattern :: khepri_path:pattern() | string(),
@@ -563,41 +505,6 @@ delete(StoreId, PathPattern, Options) ->
     khepri_path:ensure_is_valid(PathPattern1),
     Command = #delete{path = PathPattern1},
     process_command(StoreId, Command, Options).
-
--spec transaction(StoreId, Fun) -> Ret when
-      StoreId :: khepri:store_id(),
-      Fun :: khepri_tx:tx_fun(),
-      Ret :: Atomic | Aborted | NoRetIfAsync,
-      Atomic :: {atomic, khepri_tx:tx_fun_result()},
-      Aborted :: khepri_tx:tx_abort(),
-      NoRetIfAsync :: ok.
-%% @doc Runs a transaction and returns the result.
-%%
-%% Calling this function is the same as calling
-%% `transaction(StoreId, Fun, auto, #{})'.
-%%
-%% @see transaction/4.
-
-transaction(StoreId, Fun) ->
-    transaction(StoreId, Fun, auto, #{}).
-
--spec transaction(StoreId, Fun, ReadWrite | Options) -> Ret when
-      StoreId :: khepri:store_id(),
-      Fun :: khepri_tx:tx_fun(),
-      ReadWrite :: ro | rw | auto,
-      Options :: command_options() | query_options(),
-      Ret :: Atomic | Aborted | NoRetIfAsync,
-      Atomic :: {atomic, khepri_tx:tx_fun_result()},
-      Aborted :: khepri_tx:tx_abort(),
-      NoRetIfAsync :: ok.
-%% @doc Runs a transaction and returns the result.
-%%
-%% @see transaction/4.
-
-transaction(StoreId, Fun, ReadWrite) when is_atom(ReadWrite) ->
-    transaction(StoreId, Fun, ReadWrite, #{});
-transaction(StoreId, Fun, Options) when is_map(Options) ->
-    transaction(StoreId, Fun, auto, Options).
 
 -spec transaction(StoreId, Fun, ReadWrite, Options) -> Ret when
       StoreId :: khepri:store_id(),
@@ -720,10 +627,11 @@ readwrite_transaction(StoreId, StandaloneFun, Options) ->
             {atomic, Ret}
     end.
 
--spec run_sproc(StoreId, PathPattern, Args) -> Ret when
+-spec run_sproc(StoreId, PathPattern, Args, Options) -> Ret when
       StoreId :: khepri:store_id(),
       PathPattern :: khepri_path:pattern() | string(),
       Args :: [any()],
+      Options :: query_options(),
       Ret :: any().
 %% @doc Executes a stored procedure.
 %%
@@ -733,13 +641,15 @@ readwrite_transaction(StoreId, StandaloneFun, Options) ->
 %% @param StoreId the name of the Ra cluster.
 %% @param PathPattern the path to the stored procedure.
 %% @param Args the list of args to pass to the stored procedure; its length
-%% must be equal to the stored procedure arity.
+%%        must be equal to the stored procedure arity.
+%% @param Options options to tune the tree traversal or the returned structure
+%%        content.
 %%
 %% @returns the return value of the stored procedure.
 
-run_sproc(StoreId, PathPattern, Args) when is_list(Args) ->
-    Options = #{expect_specific_node => true},
-    case get(StoreId, PathPattern, Options) of
+run_sproc(StoreId, PathPattern, Args, Options) when is_list(Args) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(StoreId, PathPattern, Options1) of
         {ok, Result} ->
             [Value] = maps:values(Result),
             case Value of
@@ -754,12 +664,14 @@ run_sproc(StoreId, PathPattern, Args) when is_list(Args) ->
             throw({invalid_sproc_fun, Error})
     end.
 
--spec register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath) ->
+-spec register_trigger(
+        StoreId, TriggerId, EventFilter, StoredProcPath, Options) ->
     Ret when
       StoreId :: khepri:store_id(),
       TriggerId :: trigger_id(),
       EventFilter :: event_filter(),
-      StoredProcPath :: khepri_path:path(),
+      StoredProcPath :: khepri_path:path() | string(),
+      Options :: command_options(),
       Ret :: ok | khepri:error().
 %% @doc Registers a trigger.
 %%
@@ -790,18 +702,19 @@ run_sproc(StoreId, PathPattern, Args) when is_list(Args) ->
 %%
 %% @param StoreId the name of the Ra cluster.
 %% @param TriggerId the name of the trigger.
-%% @param EventFilter the event filter used to associate an event with a stored
-%% procedure.
+%% @param EventFilter the event filter used to associate an event with a
+%%        stored procedure.
 %% @param StoredProcPath the path to the stored procedure to execute when the
-%% corresponding event occurs.
+%%        corresponding event occurs.
 %%
 %% @returns `ok' if the trigger was registered, an "error" tuple otherwise.
 
-register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath) ->
+register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath, Options) ->
+    StoredProcPath1 = khepri_path:from_string(StoredProcPath),
     Command = #register_trigger{id = TriggerId,
-                                sproc = StoredProcPath,
+                                sproc = StoredProcPath1,
                                 event_filter = EventFilter},
-    process_command(StoreId, Command, #{}).
+    process_command(StoreId, Command, Options).
 
 -spec ack_triggers_execution(StoreId, TriggeredStoredProcs) ->
     Ret when
@@ -1330,12 +1243,12 @@ set_node_payload(#node{stat = #{payload_version := DVersion} = Stat} = Node,
 %% @private
 
 remove_node_payload(
-  #node{payload = none} = Node) ->
+  #node{payload = ?NO_PAYLOAD} = Node) ->
     Node;
 remove_node_payload(
   #node{stat = #{payload_version := DVersion} = Stat} = Node) ->
     Stat1 = Stat#{payload_version => DVersion + 1},
-    Node#node{stat = Stat1, payload = none}.
+    Node#node{stat = Stat1, payload = ?NO_PAYLOAD}.
 
 -spec add_node_child(tree_node(), khepri_path:component(), tree_node()) ->
     tree_node().
@@ -1645,7 +1558,7 @@ insert_or_update_node_cb(
             NodeProps = #{},
             {ok, Node, Result#{Path => NodeProps}};
         true ->
-            Node = create_node_record(none),
+            Node = create_node_record(?NO_PAYLOAD),
             {ok, Node, Result};
         false ->
             {error, {Reason, Info}}

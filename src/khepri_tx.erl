@@ -51,12 +51,15 @@
 %%   2. If the function modifies the tree, it must be handled in
 %%      `is_standalone_fun_still_needed()' is this file too.
 -export([put/2, put/3,
-         get/1, get/2,
-         exists/1,
-         has_data/1,
-         list/1,
-         find/2,
          delete/1,
+
+         exists/1, exists/2,
+         get/1, get/2,
+         has_data/1,
+         get_data/1, get_data/2,
+         list/1, list/2,
+         find/2, find/3,
+
          abort/1,
          is_transaction/0]).
 
@@ -65,6 +68,16 @@
          run/3]).
 
 -compile({no_auto_import, [get/1, put/2, erase/1]}).
+
+%% FIXME: Dialyzer complains about several functions with "optional" arguments
+%% (but not all). I believe the specs are correct, but can't figure out how to
+%% please Dialyzer. So for now, let's disable this specific check for the
+%% problematic functions.
+-if(?OTP_RELEASE >= 24).
+-dialyzer({no_underspecs, [exists/1,
+                           has_data/1, has_data/2,
+                           get_data/1]}).
+-endif.
 
 -type tx_fun_result() :: any() | no_return().
 -type tx_fun() :: fun(() -> tx_fun_result()).
@@ -78,77 +91,45 @@
               tx_fun_result/0,
               tx_abort/0]).
 
--spec put(PathPattern, Payload) -> Result when
-      PathPattern :: khepri_path:pattern(),
-      Payload :: khepri_machine:payload(),
+%% -------------------------------------------------------------------
+%% Equivalent of `khepri' functions allowed in transactions.
+%% -------------------------------------------------------------------
+
+-spec put(PathPattern, Data) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
       Result :: khepri_machine:result().
 %% @doc Creates or modifies a specific tree node in the tree structure.
 
-put(PathPattern, Payload) ->
-    put(PathPattern, Payload, #{}).
+put(PathPattern, Data) ->
+    put(PathPattern, Data, #{}).
 
--spec put(PathPattern, Payload, Extra) -> Result when
-      PathPattern :: khepri_path:pattern(),
-      Payload :: khepri_machine:payload(),
+-spec put(PathPattern, Data, Extra) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:payload() | khepri_machine:data() | fun(),
       Extra :: #{keep_while => khepri_condition:keep_while()},
       Result :: khepri_machine:result().
 %% @doc Creates or modifies a specific tree node in the tree structure.
 
-put(PathPattern, Payload, Extra) when ?IS_KHEPRI_PAYLOAD(Payload) ->
+put(PathPattern, Data, Extra) ->
     ensure_updates_are_allowed(),
     PathPattern1 = path_from_string(PathPattern),
+    Payload1 = khepri:wrap_payload(Data),
     {State, SideEffects} = get_tx_state(),
     Ret = khepri_machine:insert_or_update_node(
-            State, PathPattern1, Payload, Extra),
+            State, PathPattern1, Payload1, Extra),
     case Ret of
         {NewState, Result, NewSideEffects} ->
             set_tx_state(NewState, SideEffects ++ NewSideEffects);
         {NewState, Result} ->
             set_tx_state(NewState, SideEffects)
     end,
-    Result;
-put(PathPattern, Payload, _Extra) ->
-    abort({invalid_payload, PathPattern, Payload}).
+    Result.
 
-get(PathPattern) ->
-    get(PathPattern, #{}).
-
-get(PathPattern, Options) ->
-    PathPattern1 = path_from_string(PathPattern),
-    {#khepri_machine{root = Root}, _SideEffects} = get_tx_state(),
-    khepri_machine:find_matching_nodes(Root, PathPattern1, Options).
-
--spec exists(Path) -> Exists when
-      Path :: khepri_path:pattern(),
-      Exists :: boolean().
-
-exists(Path) ->
-    case get(Path, #{expect_specific_node => true}) of
-        {ok, _} -> true;
-        _       -> false
-    end.
-
--spec has_data(Path) -> HasData when
-      Path :: khepri_path:pattern(),
-      HasData :: boolean().
-
-has_data(Path) ->
-    case get(Path, #{expect_specific_node => true}) of
-        {ok, Result} ->
-            [NodeProps] = maps:values(Result),
-            maps:is_key(data, NodeProps);
-        _ ->
-            false
-    end.
-
-list(Path) ->
-    Path1 = Path ++ [?STAR],
-    get(Path1).
-
-find(Path, Condition) ->
-    Condition1 = #if_all{conditions = [?STAR_STAR, Condition]},
-    Path1 = Path ++ [Condition1],
-    get(Path1).
+-spec delete(PathPattern) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result().
+%% @doc Deletes all tree nodes matching the path pattern.
 
 delete(PathPattern) ->
     ensure_updates_are_allowed(),
@@ -162,6 +143,142 @@ delete(PathPattern) ->
             set_tx_state(NewState, SideEffects)
     end,
     Result.
+
+-spec exists(PathPattern) -> Exists when
+      PathPattern :: khepri_path:pattern() | string(),
+      Exists :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path exists,
+%% otherwise `false'.
+
+exists(PathPattern) ->
+    exists(PathPattern, #{}).
+
+-spec exists(PathPattern, Options) -> Exists when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Exists :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path exists,
+%% otherwise `false'.
+
+exists(PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(PathPattern, Options1) of
+        {ok, _} -> true;
+        _       -> false
+    end.
+
+-spec get(PathPattern) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result().
+%% @doc Returns all tree nodes matching the path pattern.
+
+get(PathPattern) ->
+    get(PathPattern, #{}).
+
+-spec get(PathPattern, Options) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Result :: khepri_machine:result().
+%% @doc Returns all tree nodes matching the path pattern.
+
+get(PathPattern, Options) ->
+    PathPattern1 = path_from_string(PathPattern),
+    {#khepri_machine{root = Root}, _SideEffects} = get_tx_state(),
+    khepri_machine:find_matching_nodes(Root, PathPattern1, Options).
+
+-spec has_data(PathPattern) -> HasData when
+      PathPattern :: khepri_path:pattern() | string(),
+      HasData :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path has data,
+%% otherwise `false'.
+
+has_data(PathPattern) ->
+    has_data(PathPattern, #{}).
+
+-spec has_data(PathPattern, Options) -> HasData when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      HasData :: boolean().
+%% @doc Returns `true' if the tree node pointed to by the given path has data,
+%% otherwise `false'.
+
+has_data(PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(PathPattern, Options1) of
+        {ok, Result} ->
+            [NodeProps] = maps:values(Result),
+            maps:is_key(data, NodeProps);
+        _ ->
+            false
+    end.
+
+-spec get_data(PathPattern) -> Data when
+      PathPattern :: khepri_path:pattern() | string(),
+      Data :: khepri_machine:data().
+%% @doc Returns the data associated with the given node path.
+
+get_data(PathPattern) ->
+    get_data(PathPattern, #{}).
+
+-spec get_data(PathPattern, Options) -> Data when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Data :: khepri_machine:data().
+%% @doc Returns the data associated with the given node path.
+
+get_data(PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(PathPattern, Options1) of
+        {ok, Result} ->
+            [{Path, NodeProps}] = maps:to_list(Result),
+            case NodeProps of
+                #{data := Data} -> Data;
+                _               -> abort({no_data, Path, NodeProps})
+            end;
+        Error ->
+            abort(Error)
+    end.
+
+-spec list(PathPattern) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Result :: khepri_machine:result().
+%% @doc Returns all direct child nodes under the given path.
+
+list(PathPattern) ->
+    list(PathPattern, #{}).
+
+-spec list(PathPattern, Options) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      Result :: khepri_machine:result().
+%% @doc Returns all direct child nodes under the given path.
+
+list(PathPattern, Options) ->
+    PathPattern1 = khepri_path:from_string(PathPattern),
+    PathPattern2 = [?ROOT_NODE | PathPattern1] ++ [?STAR],
+    get(PathPattern2, Options).
+
+-spec find(PathPattern, Condition) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Condition :: khepri_path:pattern_component(),
+      Result :: khepri_machine:result().
+%% @doc Returns all tree nodes matching the path pattern.
+
+find(PathPattern, Condition) ->
+    find(PathPattern, Condition, #{}).
+
+-spec find(PathPattern, Condition, Options) -> Result when
+      PathPattern :: khepri_path:pattern() | string(),
+      Condition :: khepri_path:pattern_component(),
+      Options :: khepri_machine:query_options(),
+      Result :: khepri_machine:result().
+%% @doc Finds tree nodes under `PathPattern' which match the given `Condition'.
+
+find(PathPattern, Condition, Options) ->
+    Condition1 = #if_all{conditions = [?STAR_STAR, Condition]},
+    PathPattern1 = khepri_path:from_string(PathPattern),
+    PathPattern2 = [?ROOT_NODE | PathPattern1] ++ [Condition1],
+    get(PathPattern2, Options).
 
 -spec abort(Reason) -> no_return() when
       Reason :: any().
@@ -177,6 +294,10 @@ is_transaction() ->
         {#khepri_machine{}, _SideEffects} -> true;
         _                                 -> false
     end.
+
+%% -------------------------------------------------------------------
+%% Internal functions.
+%% -------------------------------------------------------------------
 
 -spec to_standalone_fun(Fun, ReadWrite) -> StandaloneFun | no_return() when
       Fun :: fun(),
@@ -609,6 +730,8 @@ get_tx_props() ->
 %% This is the same as calling {@link khepri_path:from_string/1} then {@link
 %% khepri_path:is_valid/1}, but the exception is caught to abort the
 %% transaction instead.
+%%
+%% @private
 
 path_from_string(PathPattern) ->
     try

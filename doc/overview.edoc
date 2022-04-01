@@ -91,7 +91,7 @@ More payload types may be added in the future.
 
 Payloads are represented using macros or helper functions:
 <ul>
-<li>`none' and {@link khepri:no_payload/0}</li>
+<li>`?NO_PAYLOAD' and {@link khepri:no_payload/0}</li>
 <li>`#kpayload_data{data = Term}' and {@link khepri:data_payload/1}</li>
 <li>`#kpayload_sproc{sproc = Fun}' and {@link khepri:sproc_payload/1}</li>
 </ul>
