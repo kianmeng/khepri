@@ -115,6 +115,7 @@
 
          exists/1, exists/2, exists/3,
          get/1, get/2, get/3,
+         get_node_props/1, get_node_props/2, get_node_props/3,
          has_data/1, has_data/2, has_data/3,
          get_data/1, get_data/2, get_data/3,
          has_sproc/1, has_sproc/2, has_sproc/3,
@@ -929,6 +930,81 @@ get(PathPattern, Options) when is_map(Options) ->
 get(StoreId, PathPattern, Options) ->
     khepri_machine:get(StoreId, PathPattern, Options).
 
+-spec get_node_props(PathPattern) -> NodeProps when
+      PathPattern :: khepri_path:pattern() | string(),
+      NodeProps :: khepri_machine:node_props().
+%% @doc Returns the tree node properties associated with the given node path.
+%%
+%% Calling this function is the same as calling `get_node_props(StoreId,
+%% PathPattern)' with the default store ID.
+%%
+%% @see get_node_props/2.
+
+get_node_props(PathPattern) ->
+    get_node_props(?DEFAULT_RA_CLUSTER_NAME, PathPattern).
+
+-spec get_node_props
+(StoreId, PathPattern) -> NodeProps when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      NodeProps :: khepri_machine:node_props();
+(PathPattern, Options) -> NodeProps when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      NodeProps :: khepri_machine:node_props().
+%% @doc Returns the tree node properties associated with the given node path.
+%%
+%% This function accepts the following two forms:
+%% <ul>
+%% <li>`get_node_props(StoreId, PathPattern)'. Calling it is the same as
+%% calling `get_node_props(StoreId, PathPattern, #{})'.</li>
+%% <li>`get_node_props(PathPattern, Options)'. Calling it is the same as
+%% calling `get_node_props(StoreId, PathPattern, Options)' with the default
+%% store ID.</li>
+%% </ul>
+%%
+%% @see get_node_props/3.
+
+get_node_props(StoreId, PathPattern) when is_atom(StoreId) ->
+    get_node_props(StoreId, PathPattern, #{});
+get_node_props(PathPattern, Options) when is_map(Options) ->
+    get_node_props(?DEFAULT_RA_CLUSTER_NAME, PathPattern, Options).
+
+-spec get_node_props(StoreId, PathPattern, Options) -> NodeProps when
+      StoreId :: store_id(),
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      NodeProps :: khepri_machine:node_props().
+%% @doc Returns the tree node properties associated with the given node path.
+%%
+%% The `PathPattern' can be provided as native path (a list of node names and
+%% conditions) or as a string. See {@link khepri_path:from_string/1}.
+%%
+%% The `PathPattern' must point to a specific tree node and can't match
+%% multiple nodes.
+%%
+%% Once the path is normalized to a list of tree node names and conditions, it
+%% calls {@link khepri_machine:get/3}.
+%%
+%% @param StoreId the name of the Ra cluster.
+%% @param PathPattern the path (or path pattern) to the nodes to check.
+%% @param Options query options such as `favor'.
+%%
+%% @returns the tree node properties if the node exists, or throws an
+%% exception otherwise.
+%%
+%% @see khepri_machine:get/3.
+
+get_node_props(StoreId, PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(StoreId, PathPattern, Options1) of
+        {ok, Result} ->
+            [{_Path, NodeProps}] = maps:to_list(Result),
+            NodeProps;
+        Error ->
+            throw(Error)
+    end.
+
 -spec has_data(PathPattern) -> HasData when
       PathPattern :: khepri_path:pattern() | string(),
       HasData :: boolean().
@@ -994,12 +1070,11 @@ has_data(PathPattern, Options) when is_map(Options) ->
 %% @see khepri_machine:get/3.
 
 has_data(StoreId, PathPattern, Options) ->
-    Options1 = Options#{expect_specific_node => true},
-    case get(StoreId, PathPattern, Options1) of
-        {ok, Result} ->
-            [NodeProps] = maps:values(Result),
-            maps:is_key(data, NodeProps);
-        _ ->
+    try
+        NodeProps = get_node_props(StoreId, PathPattern, Options),
+        maps:is_key(data, NodeProps)
+    catch
+        throw:{error, _} ->
             false
     end.
 
@@ -1068,16 +1143,10 @@ get_data(PathPattern, Options) when is_map(Options) ->
 %% @see khepri_machine:get/3.
 
 get_data(StoreId, PathPattern, Options) ->
-    Options1 = Options#{expect_specific_node => true},
-    case get(StoreId, PathPattern, Options1) of
-        {ok, Result} ->
-            [{Path, NodeProps}] = maps:to_list(Result),
-            case NodeProps of
-                #{data := Data} -> Data;
-                _               -> throw({no_data, Path, NodeProps})
-            end;
-        Error ->
-            throw(Error)
+    NodeProps = get_node_props(StoreId, PathPattern, Options),
+    case NodeProps of
+        #{data := Data} -> Data;
+        _               -> throw({no_data, NodeProps})
     end.
 
 -spec has_sproc(PathPattern) -> HasStoredProc when

@@ -55,6 +55,7 @@
 
          exists/1, exists/2,
          get/1, get/2,
+         get_node_props/1, get_node_props/2,
          has_data/1,
          get_data/1, get_data/2,
          list/1, list/2,
@@ -76,7 +77,7 @@
 -if(?OTP_RELEASE >= 24).
 -dialyzer({no_underspecs, [exists/1,
                            has_data/1, has_data/2,
-                           get_data/1]}).
+                           get_data/1, get_data/2]}).
 -endif.
 
 -type tx_fun_result() :: any() | no_return().
@@ -186,6 +187,30 @@ get(PathPattern, Options) ->
     {#khepri_machine{root = Root}, _SideEffects} = get_tx_state(),
     khepri_machine:find_matching_nodes(Root, PathPattern1, Options).
 
+-spec get_node_props(PathPattern) -> NodeProps when
+      PathPattern :: khepri_path:pattern() | string(),
+      NodeProps :: khepri_machine:node_props().
+%% @doc Returns the tree node properties associated with the given node path.
+
+get_node_props(PathPattern) ->
+    get_node_props(PathPattern, #{}).
+
+-spec get_node_props(PathPattern, Options) -> NodeProps when
+      PathPattern :: khepri_path:pattern() | string(),
+      Options :: khepri_machine:query_options(),
+      NodeProps :: khepri_machine:node_props().
+%% @doc Returns the tree node properties associated with the given node path.
+
+get_node_props(PathPattern, Options) ->
+    Options1 = Options#{expect_specific_node => true},
+    case get(PathPattern, Options1) of
+        {ok, Result} ->
+            [{_Path, NodeProps}] = maps:to_list(Result),
+            NodeProps;
+        Error ->
+            abort(Error)
+    end.
+
 -spec has_data(PathPattern) -> HasData when
       PathPattern :: khepri_path:pattern() | string(),
       HasData :: boolean().
@@ -203,12 +228,11 @@ has_data(PathPattern) ->
 %% otherwise `false'.
 
 has_data(PathPattern, Options) ->
-    Options1 = Options#{expect_specific_node => true},
-    case get(PathPattern, Options1) of
-        {ok, Result} ->
-            [NodeProps] = maps:values(Result),
-            maps:is_key(data, NodeProps);
-        _ ->
+    try
+        NodeProps = get_node_props(PathPattern, Options),
+        maps:is_key(data, NodeProps)
+    catch
+        throw:{aborted, _} ->
             false
     end.
 
@@ -227,16 +251,10 @@ get_data(PathPattern) ->
 %% @doc Returns the data associated with the given node path.
 
 get_data(PathPattern, Options) ->
-    Options1 = Options#{expect_specific_node => true},
-    case get(PathPattern, Options1) of
-        {ok, Result} ->
-            [{Path, NodeProps}] = maps:to_list(Result),
-            case NodeProps of
-                #{data := Data} -> Data;
-                _               -> abort({no_data, Path, NodeProps})
-            end;
-        Error ->
-            abort(Error)
+    NodeProps = get_node_props(PathPattern, Options),
+    case NodeProps of
+        #{data := Data} -> Data;
+        _               -> abort({no_data, NodeProps})
     end.
 
 -spec list(PathPattern) -> Result when
