@@ -5,6 +5,78 @@
 %% Copyright (c) 2021-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
+%% @doc Khepri service and cluster management API.
+%%
+%% This module provides the public API for the service and cluster management.
+%% For convenience, some functions of this API are repeated in the {@link
+%% khepri} module.
+%%
+%% == Starting a Ra system ==
+%%
+%% The default store is based on Ra's default system. You need to change the
+%% Ra application configuration if you want to set settings. That said, it is
+%% recommended to start your own Ra system. This way, even though Ra is
+%% already running, you can choose where the Khepri data should be stored.
+%% This is also required if you need to run multiple database instances in
+%% parallel.
+%%
+%% Here is a quick start example:
+%%
+%% ```
+%% %% We start Khepri. Ra is also started because Khepri depends on it.
+%% {ok, _} = application:ensure_all_started(khepri),
+%%
+%% %% We define the configuration of the Ra system for our database. Here, we
+%% %% only care about the directory where data will be written.
+%% RaSystem = my_ra_system,
+%% RaSystemDataDir = "/path/to/storage/dir",
+%% DefaultSystemConfig = ra_system:default_config(),
+%% RaSystemConfig = DefaultSystemConfig#{name => RaSystem,
+%%                                       data_dir => RaSystemDataDir,
+%%                                       wal_data_dir => RaSystemDataDir,
+%%                                       names => ra_system:derive_names(
+%%                                                  RaSystem)},
+%%
+%% %% The configuration is ready, let's start the Ra system.
+%% {ok, _RaSystemPid} = ra_system:start(RaSystemConfig),
+%%
+%% %% At last we can start Khepri! We need to choose a name for the Ra cluster
+%% %% running in the Ra system started above. This must be an atom.
+%% RaClusterName = my_khepri_db,
+%% RaClusterFriendlyName = "My Khepri DB",
+%% {ok, StoreId} = khepri:start(
+%%                   RaSystem,
+%%                   RaClusterName,
+%%                   RaClusterFriendlyName),
+%%
+%% %% The Ra cluster name is our <em>store ID</em> used everywhere in the
+%% Khepri API.
+%% khepri:insert(StoreId, [stock, wood], 156).
+%% '''
+%%
+%% Please refer to <a href="https://github.com/rabbitmq/ra">Ra
+%% documentation</a> to learn more about Ra systems and Ra clusters.
+%%
+%% == Managing Ra cluster members ==
+%%
+%% To add a member to your Ra cluster:
+%%
+%% ```
+%% khepri_clustering:add_member(
+%%   RaSystem,
+%%   RaClusterName,
+%%   RaClusterFriendlyName,
+%%   NewMemberErlangNodename).
+%% '''
+%%
+%% To remove a member from your Ra cluster:
+%%
+%% ```
+%% khepri_clustering:remove_member(
+%%   RaClusterName,
+%%   MemberErlangNodenameToRemove).
+%% '''
+
 -module(khepri_clustering).
 
 -include_lib("kernel/include/logger.hrl").
@@ -12,7 +84,6 @@
 -include("include/khepri.hrl").
 -include("src/internal.hrl").
 
-%% For internal use only.
 -export([start/0,
          start/1,
          start/3,
@@ -28,11 +99,20 @@
          get_store_ids/0,
          forget_store_ids/0]).
 
+-if(?OTP_RELEASE >= 24).
+-dialyzer({no_underspecs, [start/1]}).
+-endif.
+
 %% -------------------------------------------------------------------
 %% Database management.
 %% -------------------------------------------------------------------
 
--spec start() -> {ok, khepri:store_id()} | {error, any()}.
+-spec start() -> Ret when
+      Ret :: khepri:ok(StoreId) | khepri:error(),
+      StoreId :: khepri:store_id().
+%% @doc Starts a store on the default Ra system.
+%%
+%% The store uses the default Ra cluster name and cluster friendly name.
 
 start() ->
     case application:ensure_all_started(ra) of
@@ -47,14 +127,30 @@ start() ->
             Error
     end.
 
--spec start(atom()) ->
-    {ok, khepri:store_id()} | {error, any()}.
+-spec start(RaSystem) -> Ret when
+      RaSystem :: atom(),
+      Ret :: khepri:ok(StoreId) | khepri:error(),
+      StoreId :: khepri:store_id().
+%% @doc Starts a store on the specified Ra system.
+%%
+%% The store uses the default Ra cluster name and cluster friendly name.
+%%
+%% @param RaSystem the name of the Ra system.
 
 start(RaSystem) ->
     start(RaSystem, ?DEFAULT_RA_CLUSTER_NAME, ?DEFAULT_RA_FRIENDLY_NAME).
 
--spec start(atom(), ra:cluster_name(), string()) ->
-    {ok, khepri:store_id()} | {error, any()}.
+-spec start(RaSystem, ClusterName, FriendlyName) -> Ret when
+      RaSystem :: atom(),
+      ClusterName :: ra:cluster_name(),
+      FriendlyName :: string(),
+      Ret :: khepri:ok(StoreId) | khepri:error(),
+      StoreId :: khepri:store_id().
+%% @doc Starts a store on the specified Ra system.
+%%
+%% @param RaSystem the name of the Ra system.
+%% @param ClusterName the name of the Ra cluster.
+%% @param FriendlyName the friendly name of the Ra cluster.
 
 start(RaSystem, ClusterName, FriendlyName) ->
     case application:ensure_all_started(khepri) of
@@ -271,6 +367,17 @@ do_remove_member(ClusterName, ExistingMembers, MemberToRemove) ->
             Error
     end.
 
+-spec reset(RaSystem, ClusterName) -> Ret when
+      RaSystem :: atom(),
+      ClusterName :: ra:cluster_name(),
+      Ret :: ok | khepri:error() | {badrpc, any()}.
+%% @doc Resets the store on this Erlang node.
+%%
+%% It does that by force-deleting the Ra local server.
+%%
+%% @param RaSystem the name of the Ra system.
+%% @param ClusterName the name of the Ra cluster.
+
 reset(RaSystem, ClusterName) ->
     ThisNode = node(),
     ThisMember = node_to_member(ClusterName, ThisNode),
@@ -337,7 +444,9 @@ remember_store_id(ClusterName) ->
     persistent_term:put(?PT_STORE_IDS, StoreIds1),
     ok.
 
--spec get_store_ids() -> [khepri:store_id()].
+-spec get_store_ids() -> [StoreId] when
+      StoreId :: khepri:store_id().
+%% @doc Returns the list of running stores.
 
 get_store_ids() ->
     maps:keys(persistent_term:get(?PT_STORE_IDS, #{})).
