@@ -160,11 +160,13 @@
                   child_list_version := child_list_version()}.
 %% Stats attached to each node in the tree structure.
 
+-type no_payload() :: ?NO_PAYLOAD.
+
 -type payload_data() :: #kpayload_data{}.
 
 -type payload_sproc() :: #kpayload_sproc{}.
 
--type payload() :: ?NO_PAYLOAD | payload_data() | payload_sproc().
+-type payload() :: no_payload() | payload_data() | payload_sproc().
 %% All types of payload stored in the nodes of the tree structure.
 %%
 %% Beside the absence of payload, the only type of payload supported is data.
@@ -199,7 +201,25 @@
 
 -type keep_while_conds_map() :: #{khepri_path:path() =>
                                   khepri_condition:keep_while()}.
-%% Internal index of the per-node keep_while conditions.
+%% Per-node `keep_while' conditions.
+%%
+%% When a node is put with `keep_while' conditions, this node will be kept in
+%% the database while each condition remains true for their associated path.
+%%
+%% Example:
+%% ```
+%% khepri:put(
+%%   StoreId,
+%%   [foo],
+%%   Payload,
+%%   #{keep_while => #{
+%%     %% The node `[foo]' will be removed as soon as `[bar]' is removed
+%%     %% because the condition associated with `[bar]' will not be true
+%%     %% anymore.
+%%     [bar] => #if_node_exists{exists = true}
+%%   }}
+%% ).
+%% '''
 
 -type keep_while_conds_revidx() :: #{khepri_path:path() =>
                                      #{khepri_path:path() => ok}}.
@@ -310,6 +330,7 @@
 -export_type([data/0,
               stat/0,
               payload/0,
+              no_payload/0,
               payload_data/0,
               payload_sproc/0,
               tree_node/0,
@@ -349,50 +370,6 @@
       NoRetIfAsync :: ok.
 %% @doc Creates or modifies a specific tree node in the tree structure.
 %%
-%% The path or path pattern must target a specific tree node.
-%%
-%% When using a simple path, if the target node does not exists, it is created
-%% using the given payload. If the target node exists, it is updated with the
-%% given payload and its payload version is increased by one. Missing parent
-%% nodes are created on the way.
-%%
-%% When using a path pattern, the behavior is the same. However if a condition
-%% in the path pattern is not met, an error is returned and the tree structure
-%% is not modified.
-%%
-%% If the target node is modified, the returned structure in the "ok" tuple
-%% will have a single key corresponding to the path of the target node. That
-%% key will point to a map containing the properties and payload (if any) of
-%% the node before the modification.
-%%
-%% If the target node is created, the returned structure in the "ok" tuple
-%% will have a single key corresponding to the path of the target node. That
-%% key will point to empty map, indicating there was no existing node (i.e.
-%% there was no properties or payload to return).
-%%
-%% The payload must be one of the following form:
-%% <ul>
-%% <li>`?NO_PAYLOAD', meaning there will be no payload attached to the
-%% node</li>
-%% <li>`#kpayload_data{data = Term}' to store any type of term in the
-%% node</li>
-%% <li>`#kpayload_sproc{sproc = Fun}' to store an anonymous function in the
-%% node</li>
-%% </ul>
-%%
-%% Example:
-%% ```
-%% %% Insert a node at `/foo/bar', overwriting the previous value.
-%% Result = khepri_machine:put(
-%%            ra_cluster_name, [foo, bar], #kpayload_data{data = new_value}),
-%%
-%% %% Here is the content of `Result'.
-%% {ok, #{[foo, bar] => #{data => old_value,
-%%                        payload_version => 1,
-%%                        child_list_version => 1,
-%%                        child_list_length => 0}}} = Result.
-%% '''
-%%
 %% @param StoreId the name of the Ra cluster.
 %% @param PathPattern the path (or path pattern) to the node to create or
 %%        modify.
@@ -400,10 +377,12 @@
 %% @param Extra extra options such as `keep_while' conditions.
 %% @param Options command options such as the command type.
 %%
-%% @returns in the case of a synchronous put, an "ok" tuple with a map with one
-%% entry, or an "error" tuple; in the case of an asynchronous put, always `ok'
-%% (the actual return value may be sent by a message if a correlation ID was
-%% specified).
+%% @returns in the case of a synchronous put, an `{ok, Result}' tuple with a
+%% map with one entry, or an `{error, Reason}' tuple; in the case of an
+%% asynchronous put, always `ok' (the actual return value may be sent by a
+%% message if a correlation ID was specified).
+%%
+%% @private
 
 put(StoreId, PathPattern, Payload, Extra, Options)
   when ?IS_KHEPRI_PAYLOAD(Payload) ->
@@ -416,6 +395,16 @@ put(StoreId, PathPattern, Payload, Extra, Options)
     process_command(StoreId, Command, Options);
 put(_StoreId, PathPattern, Payload, _Extra, _Options) ->
     throw({invalid_payload, PathPattern, Payload}).
+
+-spec prepare_payload(Payload) -> Payload when
+      Payload :: payload().
+%% @doc Finishes any needed changes to the payload before it is ready to be
+%% stored.
+%%
+%% This currently only includes the conversion of anonymous functions to
+%% standalone functions for stored procedures' payload records.
+%%
+%% @private
 
 prepare_payload(?NO_PAYLOAD = Payload) ->
     Payload;
@@ -433,30 +422,12 @@ prepare_payload(#kpayload_sproc{sproc = Fun} = Payload)
       Result :: result().
 %% @doc Returns all tree nodes matching the path pattern.
 %%
-%% The returned structure in the "ok" tuple will have a key corresponding to
-%% the path per node which matched the pattern. Each key will point to a map
-%% containing the properties and payload of that matching node.
-%%
-%% Example:
-%% ```
-%% %% Query the node at `/foo/bar'.
-%% Result = khepri_machine:get(ra_cluster_name, [foo, bar]),
-%%
-%% %% Here is the content of `Result'.
-%% {ok, #{[foo, bar] => #{data => new_value,
-%%                        payload_version => 2,
-%%                        child_list_version => 1,
-%%                        child_list_length => 0}}} = Result.
-%% '''
-%%
 %% @param StoreId the name of the Ra cluster.
-%% @param PathPattern the path (or path pattern) to match against the nodes to
-%%        retrieve.
-%% @param Options options to tune the tree traversal or the returned structure
-%%        content.
+%% @param PathPattern the path (or path pattern) to the nodes to get.
+%% @param Options query options such as `favor'.
 %%
-%% @returns an "ok" tuple with a map with zero, one or more entries, or an
-%% "error" tuple.
+%% @returns an `{ok, Result}' tuple with a map with zero, one or more entries,
+%% or an `{error, Reason}' tuple.
 
 get(StoreId, PathPattern, Options) ->
     PathPattern1 = khepri_path:from_string(PathPattern),
@@ -474,31 +445,14 @@ get(StoreId, PathPattern, Options) ->
       NoRetIfAsync :: ok.
 %% @doc Deletes all tree nodes matching the path pattern.
 %%
-%% The returned structure in the "ok" tuple will have a key corresponding to
-%% the path per node which was deleted. Each key will point to a map containing
-%% the properties and payload of that deleted node.
-%%
-%% Example:
-%% ```
-%% %% Delete the node at `/foo/bar'.
-%% Result = khepri_machine:delete(ra_cluster_name, [foo, bar]),
-%%
-%% %% Here is the content of `Result'.
-%% {ok, #{[foo, bar] => #{data => new_value,
-%%                        payload_version => 2,
-%%                        child_list_version => 1,
-%%                        child_list_length => 0}}} = Result.
-%% '''
-%%
 %% @param StoreId the name of the Ra cluster.
-%% @param PathPattern the path (or path pattern) to match against the nodes to
-%%        delete.
+%% @param PathPattern the path (or path pattern) to the nodes to delete.
 %% @param Options command options such as the command type.
 %%
-%% @returns in the case of a synchrnous delete, an "ok" tuple with a map with
-%% zero, one or more entries, or an "error" tuple; in the case of an
-%% asynchronous delete, always `ok' (the actual return value may be sent by a
-%% message if a correlation ID was specified).
+%% @returns in the case of a synchronous delete, an `{ok, Result}' tuple with
+%% a map with zero, one or more entries, or an `{error, Reason}' tuple; in the
+%% case of an asynchronous put, always `ok' (the actual return value may be
+%% sent by a message if a correlation ID was specified).
 
 delete(StoreId, PathPattern, Options) ->
     PathPattern1 = khepri_path:from_string(PathPattern),
@@ -517,37 +471,9 @@ delete(StoreId, PathPattern, Options) ->
       NoRetIfAsync :: ok.
 %% @doc Runs a transaction and returns the result.
 %%
-%% `Fun' is an arbitrary anonymous function which takes no arguments.
-%%
-%% The `ReadWrite' flag determines what the anonymous function is allowed to
-%% do and in which context it runs:
-%%
-%% <ul>
-%% <li>If `ReadWrite' is `ro', `Fun' can do whatever it wants, except modify
-%% the content of the store. In other words, uses of {@link khepri_tx:put/2}
-%% or {@link khepri_tx:delete/1} are forbidden and will abort the function.
-%% `Fun' is executed from a process on the leader Ra member.</li>
-%% <li>If `ReadWrite' is `rw', `Fun' can use the {@link khepri_tx} transaction
-%% API as well as any calls to other modules as long as those functions or what
-%% they do is permitted. See {@link khepri_tx} for more details. If `Fun' does
-%% or calls something forbidden, the transaction will be aborted. `Fun' is
-%% executed in the context of the state machine process on each Ra
-%% members.</li>
-%% <li>If `ReadWrite' is `auto', `Fun' is analyzed to determine if it calls
-%% {@link khepri_tx:put/2} or {@link khepri_tx:delete/1}, or uses any denied
-%% operations for a read/write transaction. If it does, this is the same as
-%% setting `ReadWrite' to true. Otherwise, this is the equivalent of setting
-%% `ReadWrite' to false.</li>
-%% </ul>
-%%
-%% `Options' is relevant for both read-only and read-write transactions
-%% (including audetected ones). Note that both types expect different options.
-%%
-%% The result of `Fun' can be any term. That result is returned in an
-%% `{atomic, Result}' tuple.
-%%
 %% @param StoreId the name of the Ra cluster.
 %% @param Fun an arbitrary anonymous function.
+%% @param ReadWrite the read/write or read-only nature of the transaction.
 %% @param Options command options such as the command type.
 %%
 %% @returns in the case of a synchronous transaction, `{atomic, Result}' where
@@ -645,7 +571,9 @@ readwrite_transaction(StoreId, StandaloneFun, Options) ->
 %% @param Options options to tune the tree traversal or the returned structure
 %%        content.
 %%
-%% @returns the return value of the stored procedure.
+%% @returns the result of the stored procedure execution, or throws an
+%% exception if the node does not exist, does not hold a stored procedure or
+%% if there was an error.
 
 run_sproc(StoreId, PathPattern, Args, Options) when is_list(Args) ->
     Options1 = Options#{expect_specific_node => true},
@@ -675,31 +603,6 @@ run_sproc(StoreId, PathPattern, Args, Options) when is_list(Args) ->
       Ret :: ok | khepri:error().
 %% @doc Registers a trigger.
 %%
-%% A trigger is based on an event filter. It associates an event with a stored
-%% procedure. When an event matching the event filter is emitted, the stored
-%% procedure is executed. Here is an example of an event filter:
-%%
-%% ```
-%% EventFilter = #kevf_tree{path = [stock, wood, <<"oak">>],  %% Required
-%%                          props = #{on_actions => [delete], %% Optional
-%%                                    priority => 10}},       %% Optional
-%% '''
-%%
-%% The stored procedure is expected to accept a single argument. This argument
-%% is a map containing the event properties. Here is an example:
-%%
-%% ```
-%% my_stored_procedure(Props) ->
-%%     #{path := Path},
-%%       on_action => Action} = Props.
-%% '''
-%%
-%% The stored procedure is executed on the leader's Erlang node.
-%%
-%% It is guarantied to run at least once. It could be executed multiple times
-%% if the Ra leader changes, therefore the stored procedure must be
-%% idempotent.
-%%
 %% @param StoreId the name of the Ra cluster.
 %% @param TriggerId the name of the trigger.
 %% @param EventFilter the event filter used to associate an event with a
@@ -707,7 +610,8 @@ run_sproc(StoreId, PathPattern, Args, Options) when is_list(Args) ->
 %% @param StoredProcPath the path to the stored procedure to execute when the
 %%        corresponding event occurs.
 %%
-%% @returns `ok' if the trigger was registered, an "error" tuple otherwise.
+%% @returns `ok' if the trigger was registered, an `{error, Reason}' tuple
+%% otherwise.
 
 register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath, Options) ->
     StoredProcPath1 = khepri_path:from_string(StoredProcPath),
