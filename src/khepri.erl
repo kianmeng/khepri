@@ -1820,6 +1820,9 @@ sproc_payload(#standalone_fun{} = Fun) ->
 %% Public helpers.
 %% -------------------------------------------------------------------
 
+-spec info() -> ok.
+%% @doc Lists the running stores on <em>stdout</em>.
+
 info() ->
     StoreIds = get_store_ids(),
     case StoreIds of
@@ -1831,9 +1834,14 @@ info() ->
               fun(StoreId) ->
                       io:format("  ~ts~n", [StoreId])
               end, StoreIds)
-    end.
+    end,
+    ok.
 
--spec info(store_id()) -> ok.
+-spec info(StoreId) -> ok when
+      StoreId :: store_id().
+%% @doc Lists the content of specified store on <em>stdout</em>.
+%%
+%% @param StoreID the name of the Ra cluster.
 
 info(StoreId) ->
     io:format("~n\033[1;32m== CLUSTER MEMBERS ==\033[0m~n~n", []),
@@ -1870,4 +1878,5 @@ info(StoreId) ->
             khepri_utils:display_tree(Tree);
         _ ->
             ok
-    end.
+    end,
+    ok.
