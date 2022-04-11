@@ -106,3 +106,6 @@
 %-record(kevf_process, {pid :: pid(),
 %                       props = #{} :: #{on_reason => ets:match_pattern(),
 %                                        priority => integer()}}).
+
+-define(IS_KHEPRI_EVENT_FILTER(EventFilter),
+        (is_record(EventFilter, kevf_tree))).

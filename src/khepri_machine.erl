@@ -613,8 +613,10 @@ run_sproc(StoreId, PathPattern, Args, Options) when is_list(Args) ->
 %% @returns `ok' if the trigger was registered, an `{error, Reason}' tuple
 %% otherwise.
 
-register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath, Options) ->
+register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath, Options)
+  when ?IS_KHEPRI_EVENT_FILTER(EventFilter) ->
     StoredProcPath1 = khepri_path:from_string(StoredProcPath),
+    khepri_path:ensure_is_valid(StoredProcPath1),
     Command = #register_trigger{id = TriggerId,
                                 sproc = StoredProcPath1,
                                 event_filter = EventFilter},
